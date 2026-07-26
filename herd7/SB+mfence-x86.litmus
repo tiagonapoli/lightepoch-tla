@@ -1,0 +1,14 @@
+X86 SB+mfence
+(* The fix on x86: an MFENCE (the only x86 instruction that orders StoreLoad,
+ * also emitted by a locked RMW) between the announce store and the load, on
+ * both threads. herd7's x86tso model reports the `exists` outcome FORBIDDEN
+ * (Never). Note: a plain/`volatile` store is NOT enough on x86 either --
+ * ordinary x86 stores are already release, and release does not order
+ * StoreLoad. Only MFENCE / a locked op does. *)
+{ x=0; y=0; }
+ P0          | P1          ;
+ MOV [x],$1  | MOV [y],$1  ;
+ MFENCE      | MFENCE      ;
+ MOV EAX,[y] | MOV EAX,[x] ;
+exists
+(0:EAX=0 /\ 1:EAX=0)

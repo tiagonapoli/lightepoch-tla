@@ -1,0 +1,14 @@
+X86 SB+xchg
+(* Models FixedLightEpochWithInterlockedExchange on x86: the announce becomes an
+ * Interlocked.Exchange, which the JIT emits as XCHG. XCHG to memory is
+ * *implicitly* locked on x86 (no LOCK prefix needed), so it is a full fence that
+ * drains the store buffer -- exactly like the MFENCE case. herd7's x86tso model
+ * reports the `exists` outcome FORBIDDEN (Never): the seq-cst RMW closes the
+ * StoreLoad window. *)
+{ x=0; y=0; }
+ P0             | P1             ;
+ MOV EAX,$1     | MOV EAX,$1     ;
+ XCHG [x],EAX   | XCHG [y],EAX   ;
+ MOV EBX,[y]    | MOV EBX,[x]    ;
+exists
+(0:EBX=0 /\ 1:EBX=0)

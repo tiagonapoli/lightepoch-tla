@@ -1,0 +1,15 @@
+## .NET build outputs
+bin/
+obj/
+
+## BenchmarkDotNet artifacts
+BenchmarkDotNet.Artifacts/
+
+## IDE
+.vs/
+.idea/
+*.user
+
+## OS
+.DS_Store
+Thumbs.db

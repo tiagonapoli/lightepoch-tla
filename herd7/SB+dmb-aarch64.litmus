@@ -1,0 +1,16 @@
+AArch64 SB+dmb.ish
+(* The fix: a FULL StoreLoad barrier (DMB ISH) between the announce store and
+ * the following load, on both threads. This is what Interlocked.MemoryBarrier()
+ * emits on AArch64. ARM's official model says the `exists` outcome is now
+ * FORBIDDEN (Never) -> the fence closes the reclaim-while-reading window. *)
+{
+0:X1=x; 0:X3=y;
+1:X1=y; 1:X3=x;
+}
+ P0          | P1          ;
+ MOV W0,#1   | MOV W0,#1   ;
+ STR W0,[X1] | STR W0,[X1] ;
+ DMB ISH     | DMB ISH     ;
+ LDR W2,[X3] | LDR W2,[X3] ;
+exists
+(0:X2=0 /\ 1:X2=0)

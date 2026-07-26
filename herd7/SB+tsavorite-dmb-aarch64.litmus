@@ -1,0 +1,19 @@
+AArch64 SB+tsavorite+dmb.ish
+(* The FIX applied to Tsavorite's per-operation double-announce sequence: a full
+ * StoreLoad barrier (DMB ISH, what Interlocked.MemoryBarrier() emits) after the
+ * announce store(s) and before the operation's load, on both threads. This is
+ * FixedLightEpoch fencing BOTH announce sites (Acquire ~527 and
+ * ProtectAndDrain ~304). ARM's official model now says the `exists` outcome is
+ * FORBIDDEN (Never) -> the window is closed for the shipped call sequence. *)
+{
+0:X1=x; 0:X3=y;
+1:X1=y; 1:X3=x;
+}
+ P0          | P1          ;
+ MOV W0,#1   | MOV W0,#1   ;
+ STR W0,[X1] | STR W0,[X1] ;
+ STR W0,[X1] | DMB ISH     ;
+ DMB ISH     | LDR W2,[X3] ;
+ LDR W2,[X3] |             ;
+exists
+(0:X2=0 /\ 1:X2=0)

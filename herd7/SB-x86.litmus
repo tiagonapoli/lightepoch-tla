@@ -1,0 +1,12 @@
+X86 SB
+(* The same Store-Buffer shape on x86-TSO. Even the STRONG x86 model ALLOWS
+ * this outcome: StoreLoad is the ONE reordering TSO permits. So the bug's
+ * window exists on x86 in principle -- it is just almost never observed
+ * because the store buffer drains in a few cycles and any locked instruction
+ * flushes it. herd7 (Intel's vetted x86tso model) reports this ALLOWED. *)
+{ x=0; y=0; }
+ P0          | P1          ;
+ MOV [x],$1  | MOV [y],$1  ;
+ MOV EAX,[y] | MOV EAX,[x] ;
+exists
+(0:EAX=0 /\ 1:EAX=0)

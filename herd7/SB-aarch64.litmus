@@ -1,0 +1,23 @@
+AArch64 SB
+(* Store-Buffer, the shape of the LightEpoch enter-path bug, on AArch64.
+ *
+ *   x = the reader's announce slot   (localCurrentEpoch)
+ *   y = the object's linked flag     (curPage != 0)
+ *
+ * P0 = reader     : STORE announce (x=1) ; then LOAD the linked flag (y).
+ * P1 = reclaimer  : STORE unlink/other  (y=1) ; then LOAD the scan (x).
+ *
+ * Both stores use a PLAIN str (no barrier) -- this is the buggy announce.
+ * The `exists` outcome (both loads read 0) is the reclaim-while-reading:
+ * the reader missed the unlink AND the reclaimer's scan missed the announce.
+ * ARM's official model says this is ALLOWED -> the bug is real on AArch64. *)
+{
+0:X1=x; 0:X3=y;
+1:X1=y; 1:X3=x;
+}
+ P0          | P1          ;
+ MOV W0,#1   | MOV W0,#1   ;
+ STR W0,[X1] | STR W0,[X1] ;
+ LDR W2,[X3] | LDR W2,[X3] ;
+exists
+(0:X2=0 /\ 1:X2=0)

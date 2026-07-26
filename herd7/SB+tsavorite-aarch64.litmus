@@ -1,0 +1,30 @@
+AArch64 SB+tsavorite
+(* The Store-Buffer bug as issued by Tsavorite's DEFAULT per-operation API.
+ *
+ * A BasicContext Read/Upsert/RMW runs, every operation:
+ *   UnsafeResumeThread() = Resume()/Acquire announce  (STORE x, LightEpoch.cs ~527)
+ *                        + InternalRefresh()/ProtectAndDrain announce (STORE x, ~304)
+ *   ... the operation's shared-data LOAD (y) ...
+ *   UnsafeSuspendThread() = Suspend()/Release.
+ *
+ *   x = the reader's announce slot   (localCurrentEpoch)
+ *   y = the object's linked flag     (curPage != 0)
+ *
+ * P0 = reader     : TWO plain announce STOREs (x=1, x=1) ; then LOAD the flag (y).
+ * P1 = reclaimer  : STORE unlink (y=1) ; then LOAD the scan (x).
+ *
+ * Neither announce carries a barrier (the baseline), so BOTH can sit in P0's
+ * store buffer when P1's scan reads x. The `exists` outcome (both loads read 0)
+ * is the reclaim-while-reading. ARM's official model says it is ALLOWED ->
+ * the bug reproduces for the exact call sequence Tsavorite ships. *)
+{
+0:X1=x; 0:X3=y;
+1:X1=y; 1:X3=x;
+}
+ P0          | P1          ;
+ MOV W0,#1   | MOV W0,#1   ;
+ STR W0,[X1] | STR W0,[X1] ;
+ STR W0,[X1] | LDR W2,[X3] ;
+ LDR W2,[X3] |             ;
+exists
+(0:X2=0 /\ 1:X2=0)
