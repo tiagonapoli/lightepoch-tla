@@ -5,6 +5,9 @@ obj/
 ## BenchmarkDotNet artifacts
 BenchmarkDotNet.Artifacts/
 
+## TLC model-checker scratch output
+tla/states/
+
 ## IDE
 .vs/
 .idea/
