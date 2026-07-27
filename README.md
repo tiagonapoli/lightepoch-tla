@@ -1,4 +1,4 @@
-# LightEpoch and the missing StoreLoad fence — a memory-model bug, proven five ways
+# LightEpoch and the missing StoreLoad fence
 
 This repository is a self-contained, reproducible study of a **memory-ordering
 bug in an epoch-based safe-memory-reclamation (SMR) scheme** called
@@ -7,7 +7,7 @@ epoch with a **plain store and no StoreLoad fence**. On a weakly-ordered CPU
 (**ARM64**) this lets the reclaimer's "safe-to-reclaim" scan miss a live reader
 and free memory that the reader is about to dereference.
 
-The bug is demonstrated at five independent levels, all in this repo:
+The bug is demonstrated in two complementary ways:
 
 1. **A running C# repro** (`src/`) that links the epoch implementation
    unmodified and lets the epoch machinery *itself* free the object. On real
@@ -16,15 +16,6 @@ The bug is demonstrated at five independent levels, all in this repo:
 2. **Formal TLA+ models** (`tla/`) of the x86-TSO and ARM64 memory models, and
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
    use-after-free in the baseline and proves each fix closes it.
-3. **The Store-Buffer litmus on the official ISA models** (`herd7/`) — the same
-   race run through `herd7` against Intel's x86-TSO and Arm's AArch64 reference
-   models, confirming the architects' own specs allow it on ARM64 and that a
-   release store does not fix it.
-4. **The actual JIT disassembly** (`disasm/`) of the announce path on x86-64 and
-   AArch64, showing the single instruction each fix adds (`dmb ish` / `swpal` /
-   `lock or` / `xchg`) — and that a release store would not have sufficed.
-5. **A BenchmarkDotNet project** (`bench/`) measuring what each fix costs, so the
-   choice of fix is informed by data, not folklore.
 
 > Terminology note: throughout, "fault" / "memory fault" / `0xC0000005` /
 > exit 134 all mean the process touched memory that had been unmapped — the
@@ -48,9 +39,6 @@ The bug is demonstrated at five independent levels, all in this repo:
 - [5. Running it](#5-running-it)
   - [5.1 The C# repro](#51-the-c-repro)
   - [5.2 The TLA+ models](#52-the-tla-models)
-  - [5.3 The benchmarks](#53-the-benchmarks)
-  - [5.4 The herd7 litmus tests](#54-the-herd7-litmus-tests)
-  - [5.5 The JIT disassembly](#55-the-jit-disassembly)
 - [6. How the repro works](#6-how-the-repro-works)
   - [6.1 The two threads](#61-the-two-threads)
   - [6.2 Why a fault is a *real* use-after-free, not a segfault trick](#62-why-a-fault-is-a-real-use-after-free-not-a-segfault-trick)
@@ -241,12 +229,12 @@ Graviton, Ampere, or Azure Cobalt/`Dpsv6` instance works.
 
 ## 3. The fixes
 
-| Variant | File | What changes | Reader hot-path cost | Reclaim cost |
-|---|---|---|---|---|
-| **baseline** (buggy) | `LightEpoch.cs` | plain announce store | none | none |
-| **full barrier** | `FixedLightEpoch.cs` | `Interlocked.MemoryBarrier()` after each announce | one `dmb ish` per enter | none |
-| **interlocked exchange** | `FixedLightEpochWithInterlockedExchange.cs` | announce via `Interlocked.Exchange` (seq-cst RMW) | one atomic RMW per enter | none |
-| **asymmetric barrier** | `FixedLightEpochAsymmetricBarrier.cs` | announce stays a plain store; reclaimer issues a **process-wide** barrier before the scan | **none** | one `FlushProcessWriteBuffers` / `membarrier` per reclaim |
+| Variant | File | What changes |
+|---|---|---|
+| **baseline** (buggy) | `LightEpoch.cs` | plain announce store |
+| **full barrier** | `FixedLightEpoch.cs` | `Interlocked.MemoryBarrier()` after each announce |
+| **interlocked exchange** | `FixedLightEpochWithInterlockedExchange.cs` | announce via `Interlocked.Exchange` (seq-cst RMW) |
+| **asymmetric barrier** | `FixedLightEpochAsymmetricBarrier.cs` | announce stays a plain store; reclaimer issues a **process-wide** barrier before the scan |
 
 ### 3.1 Full barrier (the straightforward fix)
 
@@ -266,10 +254,9 @@ System.Threading.Interlocked.Exchange(
 ```
 
 A single sequentially-consistent RMW both publishes the announce and carries the
-StoreLoad ordering. One instruction instead of a store followed by a barrier;
-often cheaper than `str; dmb ish` on ARM64.
+StoreLoad ordering.
 
-### 3.3 Asymmetric barrier (best for read-heavy workloads)
+### 3.3 Asymmetric barrier (move ordering to the reclaimer)
 
 Keep the reader announce a cheap plain store and move **all** the ordering cost
 to the *rare* reclaimer. Before the safe-epoch scan, the reclaimer issues a
@@ -278,9 +265,9 @@ to the *rare* reclaimer. Before the safe-epoch scan, the reclaimer issues a
 * Windows: `FlushProcessWriteBuffers()`
 * Linux: `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)`
 
-Readers pay **nothing** on the hot path; the reclaimer pays a heavy inter-processor
-interrupt, amortized because reclamation is batched. This is exactly the technique
-used by RCU and by managed-runtime garbage collectors. See
+Readers perform no additional barrier on the hot path; the reclaimer issues the
+inter-processor interrupt. This is the technique used by RCU and by
+managed-runtime garbage collectors. See
 `src/LightEpoch.Implementations/AsymmetricBarrier.cs`.
 
 All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
@@ -306,9 +293,6 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   │   ├── IEpochAccessor.cs · UtilityShim.cs · EpochOps.cs
 │   └── LightEpoch.Repro/            # the litmus workload (self-judging)
 │       ├── Program.cs · Plat.cs     # --pattern bare|tsavorite|refresh
-├── bench/
-│   ├── LightEpoch.Bench/            # BenchmarkDotNet: cost of each fix
-│   └── results/                     # checked-in ARM64 + x86 benchmark reports
 └── tla/
     ├── memory-models/               # the memory models themselves
     │   ├── X86TSO.tla · ARM64.tla
@@ -318,15 +302,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
     ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3   -> HOLDS
     ├── LightEpochTsavorite.tla                     # Tsavorite per-op API, buggy -> VIOLATED
     ├── FixedLightEpochTsavorite.tla                # Tsavorite per-op API, fixed -> HOLDS
-    ├── run.sh · Dockerfile
-└── herd7/                           # SB litmus on the OFFICIAL x86-TSO / AArch64 models
-    ├── SB-x86.litmus · SB+mfence-x86.litmus · SB+xchg-x86.litmus
-    ├── SB-aarch64.litmus · SB+rel-aarch64.litmus · SB+dmb-aarch64.litmus · SB+swpal-aarch64.litmus
-    ├── SB+tsavorite-x86.litmus · SB+tsavorite-aarch64.litmus · SB+tsavorite-dmb-aarch64.litmus
-    ├── run.sh · Dockerfile · README.md
-└── disasm/                          # JIT-native disassembly of the announce path
-    ├── x86_64/*.asm · arm64/*.asm   # one .asm per variant, per architecture
-    ├── tool/ · capture.sh · Dockerfile · README.md
+    └── run.sh · Dockerfile
 ```
 
 ---
@@ -422,105 +398,6 @@ is VIOLATED; fencing both sites HOLDS; and — the optimization — fencing **on
 Acquire while dropping the redundant second announce (`ProtectAndDrainWithoutAnnounce`)
 also HOLDS (§8.6). A negative control confirms the model has teeth: removing the
 Acquire fence too makes `FixedLightEpochTsavoriteNoAnnounce` VIOLATE.
-
-### 5.3 The benchmarks
-
-```bash
-cd bench/LightEpoch.Bench
-dotnet run -c Release -- --filter '*'            # all workloads, default job (tight CIs)
-dotnet run -c Release -- --filter '*EnterExit*'  # reader hot-path cost of each fix
-dotnet run -c Release -- --filter '*FenceMicro*' # the isolated fence cost, no type confound
-dotnet run -c Release -- --filter '*Tsavorite*'  # Tsavorite's per-op default API (§8)
-```
-
-Run these on an ARM64 host to see the numbers that matter: the full-barrier and
-interlocked variants add a per-enter cost, while the asymmetric variant is free
-on enter and expensive only on the (rare) reclaim.
-
-**Measured** (ARM64 Neoverse-N2 / Cobalt-100, BenchmarkDotNet **default job**;
-`Mean ± Error`, where Error is half the 99.9 % CI — full tables, StdDev, the x86
-control, and a per-claim significance analysis are in
-[`bench/results/`](bench/results/README.md)):
-
-| Variant | Enter/Exit (reader) | Reclaim |
-|---|---:|---:|
-| baseline (incorrect) | 14.40 ± 0.007 ns (1.00×) | 131.0 ± 0.49 ns (1.00×) |
-| full-barrier | 17.28 ± 0.007 ns (**1.20×**) | 135.8 ± 0.71 ns (1.04×) |
-| interlocked-exchange | 17.49 ± 0.022 ns (**1.21×**) | 141.7 ± 0.95 ns (1.08×) |
-| asymmetric | 14.51 ± 0.026 ns (**1.01×, ≈ free**) | 947.0 ± 6.87 ns (**7.23×**) |
-
-The full/interlocked fixes tax every reader ~20 % on ARM64; the asymmetric fix
-charges readers essentially nothing (a 0.11 ns, layout-level difference) and
-moves the whole cost to the rare, batched reclaim.
-
-**How confident is that ~20 %?** On ARM64 the baseline and full-barrier 99.9 %
-confidence intervals are separated by ~2.88 ns — about **200× the combined
-error** — so it is not measurement noise. The x86 story is subtler: the raw
-baseline→full delta there is ~10 %, but roughly half of that is a cross-variant
-**layout** artifact (the plain-store `asymmetric` variant, whose reader code is
-identical to baseline, is itself ~5 % "slower"; and full-barrier's x86 *reclaim*
-even comes out *faster* than baseline — an impossibility that exposes the
-artifact). The **fence-attributable** x86 cost is ~5 % (~0.78 ns), and an
-isolated micro-benchmark (`FenceMicro`, same type, only the barrier differs) puts
-one bare fence at **~4.4 ns on ARM64 (`dmb ish`)** vs **~7.6 ns on the
-virtualized x86 (`lock or`)** — almost none of which lands on the x86 enter path
-because it already runs a `lock cmpxchg` (see §2.1, §8). Full details, tables,
-and the significance verdicts: [`bench/results/README.md`](bench/results/README.md).
-
-**On Tsavorite's *actual* default API.** The tables above isolate a single
-`Resume()`/`Suspend()`. Tsavorite's `BasicContext` instead runs
-`Resume()` + `ProtectAndDrain()` + `Suspend()` **per operation** (§8), which
-announces **twice** — so a fix pays *two* announce fences per op. Benchmarks
-mirroring that exact sequence (`*Tsavorite*`) and the cheap amortized idiom
-(`*AmortizedRefresh*`):
-
-| Variant | Tsavorite per-op (ARM64) | Tsavorite per-op (x86) |
-|---|---:|---:|
-| baseline (incorrect) | 16.04 ± 0.010 ns (1.00×) | 19.33 ± 0.072 ns (1.00×) |
-| full-barrier | 20.90 ± 0.017 ns (**1.30×**) | 20.59 ± 0.204 ns (1.06×) |
-| interlocked-exchange | 22.98 ± 0.021 ns (**1.43×**) | 19.17 ± 0.048 ns (≈ noise) |
-| asymmetric | 16.08 ± 0.014 ns (**1.00×, ≈ free**) | 19.34 ± 0.054 ns (1.00×) |
-
-Two announce fences double the ARM64 tax to **+30 % (full) / +43 %
-(interlocked)**, while the **asymmetric fix stays free on the reader (1.00×)**. On
-x86-TSO the fix is ~6 % / noise (the Acquire path's `lock cmpxchg` already
-fences). Separately, the per-op API costs **~2.7× the amortized `ProtectAndDrain`
-idiom** on ARM64 (16.0 ns vs 6.0 ns baseline) — acquire/release machinery, not
-the fence, dominates; adopting the `UnsafeContext`/refresh idiom saves far more
-than the fence ever costs. Full tables (both arches, StdDev, significance):
-[`bench/results/README.md`](bench/results/README.md).
-
-### 5.4 The herd7 litmus tests
-
-```bash
-docker build -f herd7/Dockerfile -t lightepoch-herd7 herd7
-docker run --rm lightepoch-herd7     # runs SB on the official x86-TSO / AArch64 models
-```
-
-This runs the Store-Buffer litmus through `herd7` using Intel's and Arm's own
-reference memory models. Expected: `SB-x86`, `SB-aarch64`, `SB+tsavorite-x86`
-and `SB+tsavorite-aarch64` **Sometimes** (allowed), `SB+rel-aarch64`
-**Sometimes** (release is not enough), and `SB+mfence-x86`, `SB+xchg-x86`,
-`SB+dmb-aarch64`, `SB+swpal-aarch64`, `SB+tsavorite-dmb-aarch64` **Never**
-(fenced — the full-barrier and interlocked-exchange fixes both close the window).
-The three `SB+tsavorite-*` tests model Tsavorite's default per-operation *double*
-announce (`Resume`/Acquire then `Refresh`/ProtectAndDrain, §8). See
-[`herd7/README.md`](herd7/README.md).
-
-### 5.5 The JIT disassembly
-
-```bash
-docker build -f disasm/Dockerfile -t lightepoch-disasm .
-docker run --rm --platform linux/amd64 -v "$PWD/disasm/x86_64:/out" lightepoch-disasm
-docker run --rm --platform linux/arm64 -v "$PWD/disasm/arm64:/out"  lightepoch-disasm
-```
-
-Captured `.asm` files are already checked in under `disasm/x86_64/` and
-`disasm/arm64/`. They show the announce store for each variant: on AArch64 the
-baseline emits a plain `str` with no following barrier, the full-barrier variant
-adds `dmb ish`, the interlocked variant uses `swpal`, and the asymmetric variant
-calls the process-wide barrier at the top of the scan. See
-[`disasm/README.md`](disasm/README.md).
 
 ---
 
@@ -630,16 +507,14 @@ clean run is whether the announce store carries a StoreLoad fence.
 * A **release store / `Volatile.Write` is not a fix** — only a full StoreLoad
   barrier, a seq-cst RMW, or an asymmetric reclaimer-side barrier is.
 * All of this is checked mechanically (TLA+) and demonstrated on real hardware
-  (the C# repro), with the performance trade-offs measured (BenchmarkDotNet).
+  (the C# repro).
 
 ---
 
 ## 8. How Tsavorite actually uses LightEpoch
 
-The performance section (§5.3) measures the cost of a fix *per epoch enter*. That
-only matters in proportion to **how often Tsavorite enters the epoch** — so it is
-worth being precise about the call pattern, because it is not the cheapest one
-available.
+The safety impact depends on **how often Tsavorite enters the epoch** and which
+announce path it uses, so it is worth being precise about the call pattern.
 
 `LightEpoch` exposes two very different ways to protect work:
 
@@ -754,14 +629,6 @@ operation":
   an object safe only under the *older* epoch would still need the fence, which
   is why `FixedLightEpoch` fences that site too), but the recurring, easily-hit
   hazard lives on the **per-operation acquire path the default API uses**.
-* **The fix's relative cost is smaller than §5.3 suggests for this API.** On the
-  default path each operation *already* pays a slot-reservation `lock cmpxchg`
-  plus two announce stores plus a release. Adding one `dmb ish` / `lock or`
-  (the full-barrier fix) is a small increment on top of machinery that is already
-  locked-RMW-heavy — which is consistent with the measured ~5–10% on the
-  micro-path and even less inside a real operation. Conversely, moving Tsavorite
-  to the amortized `UnsafeContext` idiom would cut far more cost (a whole
-  acquire/release per op) than shaving the announce fence ever could.
 
 ### 8.4 Why acquire + release on every operation? (theories)
 
@@ -804,8 +671,8 @@ it best.
 
 ### 8.5 Reproducing and modelling the default API directly
 
-The default `BasicContext` sequence is exercised end-to-end by every layer of
-this repo, so the claims above are checked, not asserted:
+The default `BasicContext` sequence is exercised by both the executable repro
+and the formal model:
 
 * **Repro (`--pattern tsavorite`).** The reader runs the exact
   `UnsafeResumeThread`(`Resume()`+`Refresh()`) … `UnsafeSuspendThread` sequence
@@ -827,9 +694,6 @@ this repo, so the claims above are checked, not asserted:
   `Acquire`-announce → `ProtectAndDrain`-announce → operation-load → `Release`
   sequence, model-checked exhaustively: the unfenced spec is **VIOLATED**, and
   fencing both announce sites **HOLDS**.
-* **herd7 (`SB+tsavorite-*`).** The double-announce store shape on the official
-  x86-TSO and AArch64 models: **Sometimes** with no barrier (bug reachable for
-  the shipped call sequence), **Never** with `DMB ISH` before the load.
 
 ### 8.6 Optimization: drop the redundant second announce (`ProtectAndDrainWithoutAnnounce`)
 
@@ -838,10 +702,8 @@ Because `UnsafeResumeThread` runs `Resume()` (Acquire) and `InternalRefresh()`
 always redundant with each other: Acquire publishes `localCurrentEpoch =
 CurrentEpoch`, and — with no epoch bump in between — `ProtectAndDrain` writes the
 same value again. On the *original* code that redundant plain store is nearly
-free, so nobody noticed. On a **fixed** implementation it is not free: the fix
-puts a `StoreLoad` fence after *each* announce, so the per-op path pays **two**
-fences — the source of the ARM64 **+30 % (full-barrier) / +43 % (interlocked)**
-in §5.3 (vs ~+20 % for a single announce).
+free. On a **fixed** implementation the fix puts a `StoreLoad` fence after each
+announce, so the per-operation path unnecessarily pays for two fences.
 
 The second fence is unnecessary. The only state that causes the use-after-free
 is `localCurrentEpoch == 0` ("reader absent" → the reclaimer scans past it). That
@@ -869,8 +731,7 @@ public void ProtectAndDrainWithoutAnnounce()
 
 A hot path that resumes-then-refreshes (Tsavorite's `UnsafeResumeThread`) would
 call `Resume()` (fenced announce) + `ProtectAndDrainWithoutAnnounce()` (no fence),
-recovering one of the two per-op fences — pulling the ARM64 cost back from ~+30 %
-toward the single-announce ~+20 %, with no change to the reclaimer.
+eliminating one of the two per-operation fences with no change to the reclaimer.
 
 **Proved, not asserted.** `tla/FixedLightEpochTsavoriteNoAnnounce.tla` models
 exactly this — Acquire announces + fences, the refresh performs no announce — and
