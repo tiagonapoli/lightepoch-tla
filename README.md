@@ -183,17 +183,8 @@ So the x86 mode keeps the kernel out of the loop entirely:
 * Implemented in `QuarantineLitmus<TOps, TPattern>` (`--quarantine`), a **separate**
   class; the ARM64 unmap path is untouched.
 
-Because this verdict is software rather than hardware, it is guarded two ways:
-
-* `--self-test` poisons unconditionally every round, simulating an epoch that always
-  decides wrongly. The detector must report thousands of violations; if it is silent,
-  the detector is broken and no `--quarantine` result should be believed.
-* `sampledRounds` in the output counts rounds where the reader actually captured a
-  live pointer before the reclaimer unlinked it, distinguishing "no violation" from
-  "never sampled the window".
-
-Both guards were necessary in practice — see
-[Appendix A.7](#a7-validating-the-detector) for a detector bug they caught.
+Because this verdict is software rather than hardware, the detector itself is
+validated with `--self-test` — see [Appendix A.7](#a7-validating-the-detector).
 
 ### Reproducing the numbers
 
