@@ -1,9 +1,12 @@
 ## .NET build outputs
-bin/
-obj/
+src/**/bin/
+src/**/obj/
 
 ## BenchmarkDotNet artifacts
 BenchmarkDotNet.Artifacts/
+
+## Rust build outputs
+target/
 
 ## IDE
 .vs/

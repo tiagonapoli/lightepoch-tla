@@ -21,6 +21,12 @@ The bug is demonstrated in two complementary ways:
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
    use-after-free in the baseline and proves each fix closes it.
 
+The pattern is not confined to `LightEpoch`, or to C#. [§9](#9-the-same-bug-in-bf-trees-cpr-snapshot-handshake-rust)
+shows the identical unfenced handshake in **Bf-Tree**'s CPR snapshot phase
+transition (Rust, `bftree/`), where — because Rust's `Release`/`Acquire` lowers
+to `stlr`/`ldar` — the exposure is inverted: ARM64 is accidentally safe and
+**x86-64 is the vulnerable target**.
+
 > Terminology note: throughout, "fault" / "memory fault" / `0xC0000005` all
 > mean the process touched memory that had been unmapped — the
 > observable symptom of reclaiming memory that is still in use.
@@ -234,6 +240,7 @@ number of runs.
 - [5. Running it](#5-running-it)
   - [5.1 The C# repros](#51-the-c-repros)
   - [5.2 The TLA+ models](#52-the-tla-models)
+  - [5.3 The Bf-Tree (Rust) checks](#53-the-bf-tree-rust-checks)
 - [6. How the repros work](#6-how-the-repros-work)
   - [6.1 The two threads](#61-the-two-threads)
   - [6.2 Why a fault is a *real* use-after-free, not a segfault trick](#62-why-a-fault-is-a-real-use-after-free-not-a-segfault-trick)
@@ -248,6 +255,14 @@ number of runs.
   - [8.4 Why acquire + release on every operation? (theories)](#84-why-acquire--release-on-every-operation-theories)
   - [8.5 Reproducing and modelling the default API directly](#85-reproducing-and-modelling-the-default-api-directly)
   - [8.6 Optimization: drop the redundant second announce](#86-optimization-drop-the-redundant-second-announce-protectanddrainwithoutannounce)
+- [9. The same bug in Bf-Tree's CPR snapshot handshake (Rust)](#9-the-same-bug-in-bf-trees-cpr-snapshot-handshake-rust)
+  - [9.1 The two sites](#91-the-two-sites)
+  - [9.2 Exposure is inverted relative to LightEpoch](#92-exposure-is-inverted-relative-to-lightepoch)
+  - [9.3 Why not Shuttle](#93-why-not-shuttle)
+  - [9.4 Results](#94-results)
+  - [9.5 Running it](#95-running-it)
+  - [9.6 Three things RustMC required](#96-three-things-rustmc-required)
+  - [9.7 The fix](#97-the-fix)
 - [Appendix A. Why the unmap-based repro cannot fault on x86 (TLB shootdown)](#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)
   - [A.1 The observation](#a1-the-observation)
   - [A.2 The cause: `VirtualFree` forces a TLB shootdown](#a2-the-cause-virtualfree-forces-a-tlb-shootdown-and-on-x86-that-serializes-the-reader)
@@ -507,16 +522,24 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   │   ├── WindowsNative.cs                           # VirtualAlloc/VirtualFree, thread pinning
 │   ├── LightEpoch.Repro.Bare/       # Resume -> access -> Suspend
 │   └── LightEpoch.Repro.ResumeAndRefresh/  # Resume -> Refresh -> access -> Suspend
-└── tla/
-    ├── memory-models/               # the memory models themselves
-    │   ├── X86TSO.tla · ARM64.tla
-    ├── LightEpoch.tla                              # buggy   -> VIOLATED
-    ├── FixedLightEpoch.tla                         # fix 1   -> HOLDS
-    ├── FixedLightEpochWithInterlocked.tla          # fix 2   -> HOLDS
-    ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3   -> HOLDS
-    ├── LightEpochResumeAndRefresh.tla                     # Tsavorite per-op API, buggy -> VIOLATED
-    ├── FixedLightEpochResumeAndRefresh.tla                # Tsavorite per-op API, fixed -> HOLDS
-    └── run.sh · Dockerfile
+├── tla/
+│   ├── memory-models/               # the memory models themselves
+│   │   ├── X86TSO.tla · ARM64.tla
+│   ├── LightEpoch.tla                              # buggy   -> VIOLATED
+│   ├── FixedLightEpoch.tla                         # fix 1   -> HOLDS
+│   ├── FixedLightEpochWithInterlocked.tla          # fix 2   -> HOLDS
+│   ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3   -> HOLDS
+│   ├── LightEpochResumeAndRefresh.tla                     # Tsavorite per-op API, buggy -> VIOLATED
+│   ├── FixedLightEpochResumeAndRefresh.tla                # Tsavorite per-op API, fixed -> HOLDS
+│   └── run.sh · Dockerfile
+└── bftree/                          # the same bug in Bf-Tree's CPR handshake (§9)
+    ├── src/lib.rs                   # the handshake, every ordering cited to snapshot.rs
+    ├── src/bin/sb_handshake.rs      # Miri: the phase-transition litmus
+    ├── src/bin/uaf_sweep.rs         # Miri: use-after-free, the poison-page analogue
+    ├── tests/                       # RustMC entry points (+ what RustMC does/doesn't detect)
+    ├── genmc/cpr_handshake.c        # exhaustive RC11 proof, buggy and fixed
+    ├── genmc/sb_sc.c                # shows RustMC's build has no SC/RC11 driver
+    └── run.sh · Dockerfile         # all three tools, one image
 ```
 
 ---
@@ -606,6 +629,18 @@ is VIOLATED; fencing both sites HOLDS; and — the optimization — fencing **on
 Acquire while dropping the redundant second announce (`ProtectAndDrainWithoutAnnounce`)
 also HOLDS (§8.6). A negative control confirms the model has teeth: removing the
 Acquire fence too makes `FixedLightEpochResumeAndRefreshNoAnnounce` VIOLATE.
+
+### 5.3 The Bf-Tree (Rust) checks
+
+`bftree/` carries the same bug found in a different codebase and language, checked
+with Miri, GenMC and RustMC. All three run from one image:
+
+```bash
+docker build --platform linux/amd64 -f bftree/Dockerfile -t bftree-cpr bftree
+docker run  --rm --platform linux/amd64 bftree-cpr
+```
+
+Details and per-tool commands are in [§9.5](#95-running-it).
 
 ---
 
@@ -965,7 +1000,212 @@ preceding fenced Acquire in that path.
 
 ---
 
-## Appendix A. Why the unmap-based repro cannot fault on x86 (TLB shootdown)
+## 9. The same bug in Bf-Tree's CPR snapshot handshake (Rust)
+
+The unfenced announce is not specific to `LightEpoch`, or to C#. **Bf-Tree**
+(`bf-tree @ ad17a2e`, a Rust B-tree that ships as the `bftree_garnet` native
+library for Garnet) has no epoch framework at all — `snapshot.rs:91` says so
+outright, and reader protection there is latch/version based. But its **CPR
+snapshot phase handshake** repeats the same store-then-load-the-other-location
+pattern, in two places, with the same missing StoreLoad fence.
+
+`bftree/` reproduces it with three tools: **Miri**, **GenMC**, and **RustMC**.
+
+### 9.1 The two sites
+
+`CPRSnapShotMgr` keeps a 64-slot thread table (`thread_local_states:
+[AtomicU64; 64]`) plus a packed `global_state: AtomicU64` (3-bit phase | 61-bit
+version), and moves every thread through `Rest → Prepare → InProgress → Sweep`.
+
+**Site 1 — the phase transition.** A worker announces which phase it joined; the
+manager announces the new phase and scans the table to decide the transition is
+complete:
+
+```
+Worker (reserve_thread_slot)                Manager
+  :421 set_local_state(tid, global_state)     :332 global_state.store(new, Release)
+       -> :304 .store(state, Release)
+  :432 global_state.load(Acquire)             :342 thread_local_states[i].load(Acquire)
+  :433/:434 roll back if it changed                (check_if_phase_completed)
+```
+
+This is [§1.3's SB litmus](#13-the-race-as-a-store-buffer-sb-litmus) with the
+epoch renamed. Release→Acquire does not forbid StoreLoad reordering, so both
+loads can miss both stores: the worker commits to the **old** phase while the
+manager concludes every thread reached the **new** one. That is precisely the
+interleaving the comment at `:426-431` says the double-check prevents.
+
+The `thread_slots[tid].compare_exchange(false, true, AcqRel, Relaxed)` at `:415`
+*is* a full barrier, but it sits **before** the announce store, so it orders
+nothing for the store→load pair that matters — the same reason
+`ReserveEntryForThread`'s `Interlocked.CompareExchange` does not save the C#
+version ([§1.2](#12-the-enter-path-the-announce-store)).
+
+**Site 2 — the sweep freeze.** `sweep()` at `:556` stores `pause_snapshot =
+true` (Release) and then calls `check_if_phase_completed(INVALID)` at `:558`
+against the worker's `:421` store / `:434` load. Same race, worse consequence:
+the comment at `:559` claims "no user threads can obtain a snapshot id nor
+making changes to the tree structure" — and on that assumption the sweeper BFS
+traverses raw `*const InnerNode` pointers while a worker believes it holds a
+live slot.
+
+### 9.2 Exposure is inverted relative to LightEpoch
+
+| | announce store | announce load | x86-64 | ARM64 |
+|---|---|---|---|---|
+| `LightEpoch` (C#) | plain store | plain load | reorderable | reorderable |
+| Bf-Tree (Rust) | `Release` | `Acquire` | **reorderable** | forbidden |
+
+`LightEpoch`'s announce is a plain store, so it is exposed everywhere
+([§2](#2-memory-models-why-x86-is-harder-to-reproduce)). Bf-Tree's is
+`Release`/`Acquire`, which lowers to `stlr`/`ldar` on ARM64 — and ARMv8's RCsc
+semantics **forbid** STLR→LDAR reordering, so ARM64 is *accidentally* safe. On
+x86-64 both lower to a plain `mov`, and StoreLoad is the one reordering TSO
+permits. So this is an **x86 bug**, the mirror image of the C# one.
+
+It remains a genuine model-level bug on both: nothing in the Rust memory model
+promises that lowering, and the C11/RC11 model plainly admits the outcome.
+
+### 9.3 Why not Shuttle
+
+Bf-Tree already has Shuttle tests, and they structurally cannot find this. From
+Shuttle's own documentation for `shuttle::sync::atomic`:
+
+> Shuttle models **all** atomic operations as if they were using SeqCst ordering.
+
+Under SeqCst the outcome is unreachable by construction, so the existing test
+suite is silent on it. Loom or one of the three tools below is needed instead.
+
+### 9.4 Results
+
+| Tool | Model | Buggy orderings | `SeqCst` control |
+|---|---|---|---|
+| Miri | weak-memory emulation | **VIOLATION @ iteration 0**; **UAF** (dangling reference) | clean, 300 iterations |
+| GenMC (C) | RC11, exhaustive | **Safety violation** | **No errors — 6 complete executions** |
+| RustMC (Rust) | RA+RLX, exhaustive | **Attempt to access non-allocated memory** / **freed memory** | (cannot certify — see below) |
+
+Miri is the one to run by default: it checks the actual Rust source, it
+separates buggy from fixed, and it costs `rustup component add miri`. The GenMC
+C run is the authoritative proof that the fix closes the hole.
+
+`bftree/src/lib.rs` transcribes the handshake with every ordering cited back to a
+`snapshot.rs` line, parameterized by `Fix::{None, SeqCst}` so one harness shows
+both the bug and the fix. `uaf_sweep` is the direct analogue of the C# repro:
+where ARM64's MMU reports `0xC0000005` on an unmapped page
+([§6.2](#62-why-a-fault-is-a-real-use-after-free-not-a-segfault-trick)), Miri
+replaces the MMU — the fault is deterministic, architecture-independent, and
+names the exact dereference.
+
+### 9.5 Running it
+
+One image carries all three tools, and one command runs every check and asserts
+each one against its expected outcome:
+
+```bash
+docker build --platform linux/amd64 -f bftree/Dockerfile -t bftree-cpr bftree
+docker run  --rm --platform linux/amd64 bftree-cpr
+```
+
+It exits non-zero if any tool stops reporting what it is supposed to report.
+The summary is split by what each run is evidence *for* — the bug's existence,
+or the fix's correctness:
+
+```
+================================ Summary ================================
+
+PROOF THE BUG IS REAL   -- upstream Release/Acquire, must reproduce
+  REPRODUCED      Miri   sb_handshake   phase transition
+  REPRODUCED      Miri   uaf_sweep      use-after-free
+  REPRODUCED      GenMC  cpr_handshake.c  (RC11, exhaustive)
+  REPRODUCED      RustMC handshake_upstream  (on the Rust itself)
+  REPRODUCED      RustMC sweep_upstream      (on the Rust itself)
+
+PROOF THE FIX WORKS     -- same code with SeqCst, must be clean
+  CLEAN           Miri   sb_handshake   phase transition
+  CLEAN           Miri   uaf_sweep      use-after-free
+  CLEAN           GenMC  cpr_handshake.c  (RC11, exhaustive)
+
+CONTROLS                -- properties of the tools, not of the code
+  OK              GenMC  sb_sc.c   (negative control: SC forbids store-buffering)
+  OK              RustMC has no SC/RC11 driver -> cannot certify the fix
+=========================================================================
+```
+
+The two halves are not equally strong, and the run says so. **GenMC's clean run
+is a proof**: it enumerates the entire RC11 state space of the handshake (6
+complete executions) and finds no reachable violation. **Miri's is evidence, not
+proof** — it samples weak-memory behaviours, so 300 clean iterations bound the
+likelihood, not the possibility. RustMC appears only on the bug side because its
+build has no SC driver, so it cannot say anything about `SeqCst` (§9.6).
+
+`docker run ... bftree-cpr miri`, `... genmc` and `... rustmc` run one tool's
+checks only.
+
+To run Miri on the host instead, all it needs is `rustup +nightly component add
+miri`:
+
+```bash
+cd bftree
+cargo +nightly miri run --bin sb_handshake        # VIOLATION at iteration 0
+cargo +nightly miri run --bin sb_handshake -- fix # clean, 300 iterations
+cargo +nightly miri run --bin uaf_sweep           # UB: dangling reference
+cargo +nightly miri run --bin uaf_sweep -- fix    # clean, 300 iterations
+```
+
+GenMC and RustMC are container-only. GenMC needs an explicit `--entrypoint`
+because the stock `genmc/genmc` image does not put the binary on `PATH`:
+
+```bash
+docker run --rm -v "$PWD/genmc:/w" -w /w \
+  --entrypoint /root/genmc/RelWithDebInfo/genmc genmc/genmc -- cpr_handshake.c
+docker run --rm -v "$PWD/genmc:/w" -w /w \
+  --entrypoint /root/genmc/RelWithDebInfo/genmc genmc/genmc -- -DFIX cpr_handshake.c
+```
+
+The two `genmc` binaries in the image are not interchangeable: RustMC's own
+build lands on `PATH` and has only the RA driver, while the stock RC11-capable
+one stays at `$STOCK_GENMC` (§9.6).
+
+`tests/` exists for `cargo rustmc test`, not for `cargo test` — the tests signal
+a violation by faulting, and one of them fails by construction to document what
+RustMC ignores (§9.6). Plain `cargo test` is not a meaningful runner here.
+
+### 9.6 Three things RustMC required
+
+Recorded because each one silently produces a **false negative**:
+
+* **RustMC ignores Rust panics.** A test whose body is `assert!(false)` reports
+  `ok`. Only `abort`, non-atomic races, and bad memory accesses are errors, so
+  `signal_violation()` reports an invariant break as a null read.
+  `tests/sanity.rs` pins down which signals do and do not surface.
+* **This build ships only the RA driver.** `--sc`, `--rc11` and `--tso` all die
+  with `BUG: Failure at src/DriverFactory.hpp:60/create()`; `genmc/sb_sc.c`
+  reproduces that in five lines of C. Under RA+RLX, `SeqCst` is not
+  strengthened, so the `*_seqcst` tests fail too. **RustMC confirms the bug but
+  cannot certify the fix** — that is what the GenMC C run is for.
+* **GenMC read `u64::MAX` back as `255`.** The constructor's initialization is
+  recorded as per-byte non-atomic writes, and a 64-bit atomic read of such a
+  location returns only the low byte, so `INVALID_SNAPSHOT_STATE` never matched
+  and the violation was unreachable — a clean "no errors, 7 executions" that
+  meant nothing. `Mgr::publish_initial_state()` republishes the initial values
+  as atomic writes.
+
+Miri needed none of these, which is the other half of the argument for making it
+the default check.
+
+### 9.7 The fix
+
+The same three options as [§3](#3-the-fixes), with the same conclusion —
+`Release`/`Acquire` is not enough:
+
+* promote both sides of each handshake to `SeqCst` (`:304`, `:332`, `:342`, the
+  double-check loads at `:432`/`:434`, and `pause_snapshot` at `:556`), or
+* insert `atomic::fence(Ordering::SeqCst)` between the store and the load on
+  **both** sides.
+
+The GenMC run above verifies the first exhaustively under RC11.
+
+
 
 ### A.1 The observation
 
