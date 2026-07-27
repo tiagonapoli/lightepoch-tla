@@ -524,12 +524,15 @@ All three fixes are proven safe in `tla/` (`FixedLightEpochWithMemoryBarrier`,
 ├── tla/
 │   ├── memory-models/               # the memory models themselves
 │   │   ├── X86TSO.tla · ARM64.tla
-│   ├── LightEpoch.tla                              # buggy   -> VIOLATED
-│   ├── FixedLightEpochWithMemoryBarrier.tla        # fix 1   -> HOLDS
-│   ├── FixedLightEpochWithInterlocked.tla          # fix 2   -> HOLDS
-│   ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3   -> HOLDS
-│   ├── LightEpochResumeAndRefresh.tla                     # Tsavorite per-op API, buggy -> VIOLATED
-│   ├── FixedLightEpochResumeAndRefresh.tla                # Tsavorite per-op API, fixed -> HOLDS
+│   ├── epoch/                       # the epoch algorithm
+│   │   ├── LightEpoch.tla                              # buggy   -> VIOLATED
+│   │   ├── LightEpochResumeAndRefresh.tla              # Tsavorite per-op API, buggy -> VIOLATED
+│   │   └── fixes/
+│   │       ├── FixedLightEpochWithMemoryBarrier.tla        # fix 1 -> HOLDS
+│   │       ├── FixedLightEpochWithInterlocked.tla          # fix 2 -> HOLDS
+│   │       ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3 -> HOLDS
+│   │       ├── FixedLightEpochResumeAndRefresh.tla         # per-op API, fixed -> HOLDS
+│   │       └── FixedLightEpochResumeAndRefreshNoAnnounce.tla  # fence Acquire only -> HOLDS
 │   └── run.sh · Dockerfile
 ```
 
@@ -976,7 +979,7 @@ A hot path that resumes-then-refreshes (Tsavorite's `UnsafeResumeThread`) would
 call `Resume()` (fenced announce) + `ProtectAndDrainWithoutAnnounce()` (no fence),
 eliminating one of the two per-operation fences with no change to the reclaimer.
 
-**Proved, not asserted.** `tla/FixedLightEpochResumeAndRefreshNoAnnounce.tla` models
+**Proved, not asserted.** `tla/epoch/fixes/FixedLightEpochResumeAndRefreshNoAnnounce.tla` models
 exactly this — Acquire announces + fences, the refresh performs no announce — and
 `NoUseAfterFree` **HOLDS** exhaustively. A negative control (removing the Acquire
 fence as well) makes the same spec **VIOLATE**, confirming the single Acquire

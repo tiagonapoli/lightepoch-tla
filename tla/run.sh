@@ -51,16 +51,16 @@ run "$HERE/memory-models" ARM64  ARM64_Full.cfg      HOLDS    "DMB ISH / seq-cst
 
 echo ""
 echo "================= LightEpoch reclamation specs ================="
-run "$HERE" LightEpoch                            LightEpoch.cfg                            VIOLATED "missing announce fence"
-run "$HERE" FixedLightEpochWithMemoryBarrier      FixedLightEpochWithMemoryBarrier.cfg      HOLDS    "full StoreLoad barrier"
-run "$HERE" FixedLightEpochWithInterlocked        FixedLightEpochWithInterlocked.cfg        HOLDS    "atomic RMW announce"
-run "$HERE" FixedLightEpochWithAsymmetricBarrier  FixedLightEpochWithAsymmetricBarrier.cfg  HOLDS    "reclaimer-side barrier"
+run "$HERE/epoch"       LightEpoch                            LightEpoch.cfg                            VIOLATED "missing announce fence"
+run "$HERE/epoch/fixes" FixedLightEpochWithMemoryBarrier      FixedLightEpochWithMemoryBarrier.cfg      HOLDS    "full StoreLoad barrier"
+run "$HERE/epoch/fixes" FixedLightEpochWithInterlocked        FixedLightEpochWithInterlocked.cfg        HOLDS    "atomic RMW announce"
+run "$HERE/epoch/fixes" FixedLightEpochWithAsymmetricBarrier  FixedLightEpochWithAsymmetricBarrier.cfg  HOLDS    "reclaimer-side barrier"
 
 echo ""
 echo "========= Resume+Refresh per-operation API specs (Resume+Refresh+Suspend) ========="
-run "$HERE" LightEpochResumeAndRefresh                   LightEpochResumeAndRefresh.cfg                   VIOLATED "both per-op announces unfenced"
-run "$HERE" FixedLightEpochResumeAndRefresh              FixedLightEpochResumeAndRefresh.cfg              HOLDS    "fence at both announce sites"
-run "$HERE" FixedLightEpochResumeAndRefreshNoAnnounce    FixedLightEpochResumeAndRefreshNoAnnounce.cfg    HOLDS    "fence only Acquire; drop the redundant 2nd announce"
+run "$HERE/epoch"       LightEpochResumeAndRefresh                   LightEpochResumeAndRefresh.cfg                   VIOLATED "both per-op announces unfenced"
+run "$HERE/epoch/fixes" FixedLightEpochResumeAndRefresh              FixedLightEpochResumeAndRefresh.cfg              HOLDS    "fence at both announce sites"
+run "$HERE/epoch/fixes" FixedLightEpochResumeAndRefreshNoAnnounce    FixedLightEpochResumeAndRefreshNoAnnounce.cfg    HOLDS    "fence only Acquire; drop the redundant 2nd announce"
 
 echo ""
 if [[ $failures -ne 0 ]]; then
