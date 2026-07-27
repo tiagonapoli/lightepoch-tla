@@ -27,7 +27,7 @@ The bug is demonstrated in two complementary ways:
   - [1.1 What an epoch protects](#11-what-an-epoch-protects)
   - [1.2 The enter path (the announce store)](#12-the-enter-path-the-announce-store)
   - [1.3 The race, as a Store-Buffer (SB) litmus](#13-the-race-as-a-store-buffer-sb-litmus)
-- [2. Memory models: why x86 hides it and ARM64 exposes it](#2-memory-models-why-x86-hides-it-and-arm64-exposes-it)
+- [2. Memory models: why x86 is harder to reproduce](#2-memory-models-why-x86-is-harder-to-reproduce)
   - [2.1 x86-64 (TSO — Total Store Order)](#21-x86-64-tso--total-store-order)
   - [2.2 ARM64 (AArch64 — a weak model)](#22-arm64-aarch64--a-weak-model)
   - [2.3 Why emulation cannot reproduce it](#23-why-emulation-cannot-reproduce-it)
@@ -145,7 +145,7 @@ both textual announce sites).
 
 ---
 
-## 2. Memory models: why x86 hides it and ARM64 exposes it
+## 2. Memory models: why x86 is harder to reproduce
 
 The forbidden SB outcome is only *forbidden under sequential consistency*. Real
 CPUs are not sequentially consistent: every mainstream architecture has
@@ -157,33 +157,37 @@ reordering** — is exactly what the bug needs.
 
 x86 is *strong*: its store buffer is **FIFO**, and the **only** reordering it
 permits is StoreLoad. So the bug's window **does exist** on x86 in principle.
-In practice it is almost never observed because:
+Whether a finite hardware test observes it depends on microarchitecture,
+contention, scheduling, generated code, and whether the store propagates before
+the reclaimer finishes its longer path. A locked instruction would close the
+window only if it occurred after the announcement and before the protected
+load; unrelated runtime activity may perturb timing but is not a correctness
+mechanism.
 
-* the store buffer drains to cache in a handful of cycles, and
-* any `lock`-prefixed instruction (and .NET emits plenty around allocation,
-  GC write barriers, and interlocked operations) fully drains it immediately.
+In the Windows x86-64 runs performed for this study, the buggy build completed
+without an observed fault. That is an empirical result, not an architectural
+guarantee: x86-TSO still permits the StoreLoad outcome modeled here.
 
-So on x86 the reader's announce is visible to the scan essentially instantly, and
-the buggy build runs to completion on Windows x86-64. This is why the defect
-can sit in code for years: **all the CI and dev machines are x86.**
+**Nearby locked operations may affect timing, but they do not fix the bug.**
+Every *enter* goes through `TryAcquireEntry`, which claims the thread's slot with
+an `Interlocked.CompareExchange` on `threadId` (`lock cmpxchg`), and every
+reclaim advances the global epoch with `Interlocked.Increment`
+(`BumpCurrentEpoch`, a locked `xadd`). The JIT places the reservation CAS before
+the plain announcement store:
 
-**The epoch's own code accidentally fences it on x86.** This is worth spelling
-out, because it is the concrete reason the missing barrier is invisible in
-practice. Every *enter* goes through `TryAcquireEntry`, which claims the thread's
-slot in the epoch table with an `Interlocked.CompareExchange` on
-`threadId` — a `lock cmpxchg`, i.e. a full fence — and every *reclaim* advances
-the global epoch with `Interlocked.Increment` (`BumpCurrentEpoch`, a `lock`ed
-`xadd`). These sit on the very same hot path as the announce, only a few
-instructions away, and the GC and allocator sprinkle in more `lock`-prefixed
-operations still. The slot-reservation CAS actually runs *just before* the plain
-announce store, so it does not, by the letter of the model, order that store
-ahead of the reader's later load — but its constant presence, on top of TSO's
-few-cycle FIFO drain, means the store buffer is never allowed to hold the
-announce long enough for a reclaimer on another core to miss it. The plain store
-is, in effect, fenced *by luck*. Take the luck away — a weak architecture with no
-incidental drain and no fast FIFO commit — and the same code faults immediately.
-(You can see this CAS at `TryAcquireEntry` and the increment at
-`BumpCurrentEpoch` in `src/LightEpoch.Implementations/LightEpoch.cs`.)
+```asm
+lock cmpxchg  dword ptr [slot.threadId], threadId
+     mov      qword ptr [slot.localCurrentEpoch], currentEpoch
+     mov      ..., qword ptr [sharedObject]
+```
+
+The locked CAS is a full fence around operations ordered before and after the
+CAS itself, but the announcement is **after** it. It therefore does not order
+the announcement before the subsequent shared-object load. These locked
+operations, allocator activity, scheduling, and x86 store-buffer behavior may
+change how often the narrow window is observed, but the JIT output cannot prove
+that any of them closes it. The only defensible conclusion from a clean x86 run
+is that the allowed outcome was not observed during that run.
 
 A subtle and important corollary, confirmed by the model: **an x86 release store
 does not help.** On TSO, ordinary stores *already* have release semantics, and
@@ -585,13 +589,12 @@ the caller, so it is not what the default API does.
 Two consequences fall out of "the default path acquires and releases on every
 operation":
 
-* **The incidental x86 fence (§2.1) fires on every default operation.** Since
-  each `BasicContext` operation runs `TryAcquireEntry`'s
-  `Interlocked.CompareExchange` (a full fence on x86) right before the announce,
-  the store buffer is drained on essentially every enter. That is a second,
-  independent reason the missing StoreLoad fence is invisible on x86 in
-  Tsavorite specifically — not just "store buffers drain fast," but "a locked RMW
-  runs on the same hot path, every op."
+* **A locked RMW occurs near the announcement on every default operation.**
+  Each `BasicContext` operation runs `TryAcquireEntry`'s
+  `Interlocked.CompareExchange` immediately before the announcement. This may
+  perturb the timing of an executable x86 reproduction, but it is not the
+  required fence: because the announcement follows the RMW, the later
+  shared-object load can still pass that announcement under x86-TSO.
 * **The per-operation pattern reopens the vulnerable window on every command.**
   `Suspend()`/`Release()` resets the slot to
   `kInvalidIndex` and `localCurrentEpoch` to `0` at the end of *every* operation,
