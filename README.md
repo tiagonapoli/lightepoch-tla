@@ -532,7 +532,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpochWithMemoryBarrier`,
 │   │       ├── FixedLightEpochWithInterlocked.tla          # fix 2 -> HOLDS
 │   │       ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3 -> HOLDS
 │   │       ├── FixedLightEpochResumeAndRefresh.tla         # per-op API, fixed -> HOLDS
-│   │       └── FixedLightEpochResumeAndRefreshNoAnnounce.tla  # fence Acquire only -> HOLDS
+│   │       └── FixedLightEpochResumeAndRefreshSingleFence.tla # fence Acquire only -> HOLDS
 │   └── run.sh · Dockerfile
 ```
 
@@ -602,29 +602,37 @@ docker build -f tla/Dockerfile -t lightepoch-tla tla
 docker run --rm lightepoch-tla        # checks all 12 specs and prints expected vs. actual
 ```
 
-Expected outcomes:
+Expected outcomes. Note the **Models** column: every spec whose name starts with
+`Fixed` describes a **proposed change to Tsavorite**, not how Tsavorite behaves
+today. Tsavorite as shipped is `LightEpoch` / `LightEpochResumeAndRefresh`, and
+both are VIOLATED.
 
-| Spec | Config | Result |
-|---|---|---|
-| `X86TSO` | no fence | VIOLATED |
-| `X86TSO` | MFENCE | HOLDS |
-| `ARM64` | none | VIOLATED |
-| `ARM64` | release | VIOLATED |
-| `ARM64` | full | HOLDS |
-| `LightEpoch` | — | VIOLATED |
-| `FixedLightEpochWithMemoryBarrier` | — | HOLDS |
-| `FixedLightEpochWithInterlocked` | — | HOLDS |
-| `FixedLightEpochWithAsymmetricBarrier` | — | HOLDS |
-| `LightEpochResumeAndRefresh` (per-op `Resume`+`Refresh`+`Suspend`) | — | VIOLATED |
-| `FixedLightEpochResumeAndRefresh` (both announce sites fenced) | — | HOLDS |
-| `FixedLightEpochResumeAndRefreshNoAnnounce` (fence only Acquire; drop 2nd announce) | — | HOLDS |
+| Spec | Config | Models | Result |
+|---|---|---|---|
+| `X86TSO` | no fence | hardware litmus | VIOLATED |
+| `X86TSO` | MFENCE | hardware litmus | HOLDS |
+| `ARM64` | none | hardware litmus | VIOLATED |
+| `ARM64` | release | hardware litmus | VIOLATED |
+| `ARM64` | full | hardware litmus | HOLDS |
+| `LightEpoch` | — | **Tsavorite as shipped** | **VIOLATED** |
+| `FixedLightEpochWithMemoryBarrier` | — | proposed fix | HOLDS |
+| `FixedLightEpochWithInterlocked` | — | proposed fix | HOLDS |
+| `FixedLightEpochWithAsymmetricBarrier` | — | proposed fix | HOLDS |
+| `LightEpochResumeAndRefresh` (per-op `Resume`+`Refresh`+`Suspend`) | — | **Tsavorite as shipped** | **VIOLATED** |
+| `FixedLightEpochResumeAndRefresh` (both announce sites fenced) | — | proposed fix, 2 barriers/op | HOLDS |
+| `FixedLightEpochResumeAndRefreshSingleFence` (fence only Acquire; drop 2nd announce) | — | proposed fix, 1 barrier/op | HOLDS |
 
-The last three model **Tsavorite's default per-operation API** (§8): the buggy
-spec issues both announce stores (Acquire and ProtectAndDrain) with no fence and
-is VIOLATED; fencing both sites HOLDS; and — the optimization — fencing **only**
-Acquire while dropping the redundant second announce (`ProtectAndDrainWithoutAnnounce`)
-also HOLDS (§8.6). A negative control confirms the model has teeth: removing the
-Acquire fence too makes `FixedLightEpochResumeAndRefreshNoAnnounce` VIOLATE.
+The last three model **Tsavorite's default per-operation API** (§8). The buggy
+spec — the one that matches the code Tsavorite ships — issues both announce
+stores (Acquire and ProtectAndDrain) with no fence and is VIOLATED. The other
+two are the two candidate fixes: fencing both sites HOLDS, and fencing **only**
+Acquire while dropping the redundant second announce
+(`ProtectAndDrainWithoutAnnounce`) also HOLDS (§8.6), at half the barrier cost.
+
+A `HOLDS` on a `Fixed*` spec therefore means "this fix works", **never**
+"Tsavorite is already correct". A negative control confirms the remaining fence
+is load-bearing rather than decorative: removing the Acquire fence too makes
+`FixedLightEpochResumeAndRefreshSingleFence` VIOLATE.
 
 ---
 
@@ -943,6 +951,14 @@ and the formal model:
 
 ### 8.6 Optimization: drop the redundant second announce (`ProtectAndDrainWithoutAnnounce`)
 
+> **This section describes a proposed change, layered on top of a fix.** It is
+> *not* a description of Tsavorite's current behavior, and it is *not* an
+> argument that Tsavorite is already safe. `ProtectAndDrainWithoutAnnounce()`
+> does not exist in Tsavorite — it is a new method this proposal adds, and it
+> only makes sense once `Acquire` is fenced. Read it as "the cheapest correct
+> fix (one barrier per operation)", not as "no fix needed". Tsavorite as shipped
+> is still `LightEpochResumeAndRefresh`, which is **VIOLATED**.
+
 Because `UnsafeResumeThread` runs `Resume()` (Acquire) and `InternalRefresh()`
 (`ProtectAndDrain()`) **back-to-back**, the two announce stores are almost
 always redundant with each other: Acquire publishes `localCurrentEpoch =
@@ -979,7 +995,7 @@ A hot path that resumes-then-refreshes (Tsavorite's `UnsafeResumeThread`) would
 call `Resume()` (fenced announce) + `ProtectAndDrainWithoutAnnounce()` (no fence),
 eliminating one of the two per-operation fences with no change to the reclaimer.
 
-**Proved, not asserted.** `tla/epoch/fixes/FixedLightEpochResumeAndRefreshNoAnnounce.tla` models
+**Proved, not asserted.** `tla/epoch/fixes/FixedLightEpochResumeAndRefreshSingleFence.tla` models
 exactly this — Acquire announces + fences, the refresh performs no announce — and
 `NoUseAfterFree` **HOLDS** exhaustively. A negative control (removing the Acquire
 fence as well) makes the same spec **VIOLATE**, confirming the single Acquire

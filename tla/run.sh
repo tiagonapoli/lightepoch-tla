@@ -60,7 +60,7 @@ echo ""
 echo "========= Resume+Refresh per-operation API specs (Resume+Refresh+Suspend) ========="
 run "$HERE/epoch"       LightEpochResumeAndRefresh                   LightEpochResumeAndRefresh.cfg                   VIOLATED "both per-op announces unfenced"
 run "$HERE/epoch/fixes" FixedLightEpochResumeAndRefresh              FixedLightEpochResumeAndRefresh.cfg              HOLDS    "fence at both announce sites"
-run "$HERE/epoch/fixes" FixedLightEpochResumeAndRefreshNoAnnounce    FixedLightEpochResumeAndRefreshNoAnnounce.cfg    HOLDS    "fence only Acquire; drop the redundant 2nd announce"
+run "$HERE/epoch/fixes" FixedLightEpochResumeAndRefreshSingleFence   FixedLightEpochResumeAndRefreshSingleFence.cfg   HOLDS    "fence only Acquire; drop the redundant 2nd announce"
 
 echo ""
 if [[ $failures -ne 0 ]]; then

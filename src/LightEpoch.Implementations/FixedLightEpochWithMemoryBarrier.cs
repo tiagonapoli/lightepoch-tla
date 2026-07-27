@@ -319,7 +319,7 @@ namespace LightEpoch.Core
         /// (Tsavorite's per-operation UnsafeResumeThread path). Drives drain/progress but
         /// performs no announce: Resume()/Acquire already published localCurrentEpoch behind a
         /// StoreLoad fence and it is still this thread's newest announcement, so re-announcing
-        /// and re-fencing here is redundant. Verified safe by tla/FixedLightEpochResumeAndRefreshNoAnnounce.tla.
+        /// and re-fencing here is redundant. Verified safe by tla/epoch/fixes/FixedLightEpochResumeAndRefreshSingleFence.tla.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void ProtectAndDrainWithoutAnnounce()
