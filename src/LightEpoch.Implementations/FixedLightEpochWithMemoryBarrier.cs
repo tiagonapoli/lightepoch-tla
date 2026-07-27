@@ -11,7 +11,7 @@ namespace LightEpoch.Core
     /// <summary>
     /// Epoch protection
     /// </summary>
-    public sealed unsafe class FixedLightEpoch
+    public sealed unsafe class FixedLightEpochWithMemoryBarrier
     {
         /// <summary>
         /// Buffer to track information for LightEpoch instances. This is used:
@@ -175,7 +175,7 @@ namespace LightEpoch.Core
         /// <summary>
         /// Instantiate the epoch table
         /// </summary>
-        public FixedLightEpoch()
+        public FixedLightEpochWithMemoryBarrier()
         {
             instanceId = SelectInstance();
 
@@ -664,7 +664,7 @@ namespace LightEpoch.Core
             {
                 // If the MSB (disposed flag) is set, the epoch is being disposed.
                 if ((newCount & kDisposedFlag) != 0)
-                    throw new ObjectDisposedException(nameof(FixedLightEpoch));
+                    throw new ObjectDisposedException(nameof(FixedLightEpochWithMemoryBarrier));
 
                 while (true)
                 {
@@ -681,7 +681,7 @@ namespace LightEpoch.Core
             }
             catch (OperationCanceledException)
             {
-                throw new ObjectDisposedException(nameof(FixedLightEpoch));
+                throw new ObjectDisposedException(nameof(FixedLightEpochWithMemoryBarrier));
             }
             finally
             {

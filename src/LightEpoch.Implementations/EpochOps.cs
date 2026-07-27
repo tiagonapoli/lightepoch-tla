@@ -31,13 +31,13 @@ namespace LightEpoch.Core
 
     public readonly struct FullBarrierOps : IEpochOps
     {
-        readonly FixedLightEpoch e;
-        public FullBarrierOps() { e = new FixedLightEpoch(); }
+        readonly FixedLightEpochWithMemoryBarrier e;
+        public FullBarrierOps() { e = new FixedLightEpochWithMemoryBarrier(); }
         public void Resume() => e.Resume();
         public void Refresh() => e.ProtectAndDrain();
         public void Suspend() => e.Suspend();
         public void BumpCurrentEpoch(Action onDrain) => e.BumpCurrentEpoch(onDrain);
-        public string Name => "full-barrier (FixedLightEpoch)";
+        public string Name => "full-barrier (FixedLightEpochWithMemoryBarrier)";
     }
 
     public readonly struct InterlockedExchangeOps : IEpochOps

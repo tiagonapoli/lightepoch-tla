@@ -458,7 +458,7 @@ Graviton, Ampere, or Azure Cobalt/`Dpsv6` instance works.
 | Variant | File | What changes |
 |---|---|---|
 | **baseline** (buggy) | `LightEpoch.cs` | plain announce store |
-| **full barrier** | `FixedLightEpoch.cs` | `Interlocked.MemoryBarrier()` after each announce |
+| **full barrier** | `FixedLightEpochWithMemoryBarrier.cs` | `Interlocked.MemoryBarrier()` after each announce |
 | **interlocked exchange** | `FixedLightEpochWithInterlockedExchange.cs` | announce via `Interlocked.Exchange` (seq-cst RMW) |
 | **asymmetric barrier** | `FixedLightEpochAsymmetricBarrier.cs` | announce stays a plain store; reclaimer issues a **process-wide** barrier before the scan |
 
@@ -509,7 +509,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 ├── src/
 │   ├── LightEpoch.Implementations/  # the 4 epoch variants (shared library)
 │   │   ├── LightEpoch.cs                              # baseline (buggy)
-│   │   ├── FixedLightEpoch.cs                         # full barrier
+│   │   ├── FixedLightEpochWithMemoryBarrier.cs        # full barrier
 │   │   ├── FixedLightEpochWithInterlockedExchange.cs  # seq-cst RMW announce
 │   │   ├── FixedLightEpochAsymmetricBarrier.cs        # reclaimer-side barrier
 │   │   ├── AsymmetricBarrier.cs                       # FlushProcessWriteBuffers / membarrier
@@ -957,7 +957,7 @@ seeing the older `E ≤ E'` — *more* conservative, never less. So fencing
 the announce entirely and only drive drain/progress:
 
 ```csharp
-// FixedLightEpoch.cs
+// FixedLightEpochWithMemoryBarrier.cs
 public void ProtectAndDrainWithoutAnnounce()
 {
     ref var entry = ref Metadata.Entries.GetRef(instanceId);
