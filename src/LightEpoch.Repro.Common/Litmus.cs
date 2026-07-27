@@ -42,15 +42,13 @@ namespace LightEpoch.Repro.Common
         private readonly int deref;
         private readonly int readerCore;
         private readonly int reclaimerCore;
-        private readonly bool protectedReclaimer;
 
-        public Litmus(long rounds, int deref, int readerCore, int reclaimerCore, bool protectedReclaimer = false)
+        public Litmus(long rounds, int deref, int readerCore, int reclaimerCore)
         {
             this.rounds = rounds;
             this.deref = deref;
             this.readerCore = readerCore;
             this.reclaimerCore = reclaimerCore;
-            this.protectedReclaimer = protectedReclaimer;
             ops = new TOps();
             pattern = new TPattern();
         }
@@ -108,10 +106,13 @@ namespace LightEpoch.Repro.Common
             sink += accumulator;
         }
 
+        // BumpCurrentEpoch asserts ThisInstanceProtected(), so the retiring thread holds
+        // an epoch and refreshes it every round, the way Tsavorite drives the epoch in
+        // production. Retiring from an unprotected thread would leave it out of the
+        // safe-epoch scan and widen the race window past anything real code can produce.
         private void ReclaimerLoop()
         {
-            if (protectedReclaimer)
-                ops.Resume();
+            ops.Resume();
 
             for (long round = 0; round < rounds; round++)
             {
@@ -125,14 +126,12 @@ namespace LightEpoch.Repro.Common
                 curPage = 0;
                 long pageAddress = (long)page;
                 ops.BumpCurrentEpoch(() => WindowsNative.Free((byte*)pageAddress));
-                if (protectedReclaimer)
-                    ops.Refresh();
+                ops.Refresh();
 
                 EndBarrier();
             }
 
-            if (protectedReclaimer)
-                ops.Suspend();
+            ops.Suspend();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

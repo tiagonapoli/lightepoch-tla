@@ -97,7 +97,6 @@ namespace LightEpoch.Repro.Common
             bool crossNuma = false;
             bool quarantine = false;
             bool selfTest = false;
-            bool protectedReclaimer = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -144,9 +143,6 @@ namespace LightEpoch.Repro.Common
                         quarantine = true;
                         selfTest = true;
                         break;
-                    case "--protected-reclaimer":
-                        protectedReclaimer = true;
-                        break;
                     case "-h":
                     case "--help":
                         Usage<TPattern>();
@@ -184,9 +180,7 @@ namespace LightEpoch.Repro.Common
             Console.WriteLine(quarantine
                 ? "detection: quarantine (page pool + poison sentinel; no syscall in the race loop)"
                 : "detection: unmap (VirtualFree MEM_RELEASE; a fault is a hardware access violation)");
-            Console.WriteLine(protectedReclaimer
-                ? "reclaimer: protected (Resume + Refresh each round) - matches real Tsavorite API usage"
-                : "reclaimer: unprotected (retires without holding an epoch) - maximizes the race window");
+            Console.WriteLine("reclaimer: protected (Resume + Refresh each round), as Tsavorite drives the epoch in production");
 
             if (readerCore >= 0 || reclaimerCore >= 0)
             {
@@ -204,7 +198,7 @@ namespace LightEpoch.Repro.Common
 
                 WarnIfSamePhysicalCore(physicalCores, reclaimerCore, readerCore);
                 Console.WriteLine($"pair 0: cores(reclaimer={reclaimerCore},reader={readerCore})");
-                return RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest, protectedReclaimer);
+                return RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest);
             }
 
             int[] selected;
@@ -222,7 +216,7 @@ namespace LightEpoch.Repro.Common
 
             Console.WriteLine($"core selection: one logical processor per physical core" + (crossNuma ? ", pairs straddle NUMA nodes" : string.Empty) + (seed.HasValue ? $" (shuffled, seed={seed.Value})" : " (in enumeration order)"));
 
-            return RunPairs<TPattern>(impl, rounds, deref, pairs, selected, quarantine, selfTest, protectedReclaimer);
+            return RunPairs<TPattern>(impl, rounds, deref, pairs, selected, quarantine, selfTest);
         }
 
         private static void WarnIfSamePhysicalCore(IReadOnlyList<CoreTopology.PhysicalCore> physicalCores, int reclaimerCore, int readerCore)
@@ -242,7 +236,7 @@ namespace LightEpoch.Repro.Common
         // reader+reclaimer per pair, each thread on its own physical core. In unmap
         // mode a real fault is an access violation that terminates the whole process;
         // in quarantine mode each pair returns its own verdict, so they are combined.
-        private static int RunPairs<TPattern>(string impl, long rounds, int deref, int pairs, int[] cores, bool quarantine, bool selfTest, bool protectedReclaimer)
+        private static int RunPairs<TPattern>(string impl, long rounds, int deref, int pairs, int[] cores, bool quarantine, bool selfTest)
             where TPattern : struct, IReproPattern
         {
             var numaByLogicalProcessor = new Dictionary<int, int>();
@@ -262,7 +256,7 @@ namespace LightEpoch.Repro.Common
                 numaByLogicalProcessor.TryGetValue(reclaimerCore, out int reclaimerNode);
                 numaByLogicalProcessor.TryGetValue(readerCore, out int readerNode);
                 Console.WriteLine($"pair {p}: cores(reclaimer={reclaimerCore}[numa{reclaimerNode}],reader={readerCore}[numa{readerNode}])");
-                var t = new Thread(() => exitCodes[pairIndex] = RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest, protectedReclaimer))
+                var t = new Thread(() => exitCodes[pairIndex] = RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest))
                 {
                     IsBackground = false,
                     Name = $"pair{p}"
@@ -283,27 +277,27 @@ namespace LightEpoch.Repro.Common
             return 0;
         }
 
-        private static int RunSingle<TPattern>(string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest, bool protectedReclaimer)
+        private static int RunSingle<TPattern>(string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest)
             where TPattern : struct, IReproPattern
         {
             if (quarantine)
             {
                 return impl switch
                 {
-                    "baseline" => new QuarantineLitmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, protectedReclaimer).Run(),
-                    "fullbarrier" => new QuarantineLitmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, protectedReclaimer).Run(),
-                    "interlocked" => new QuarantineLitmus<InterlockedExchangeOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, protectedReclaimer).Run(),
-                    "asymmetric" => new QuarantineLitmus<AsymmetricOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, protectedReclaimer).Run(),
+                    "baseline" => new QuarantineLitmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
+                    "fullbarrier" => new QuarantineLitmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
+                    "interlocked" => new QuarantineLitmus<InterlockedExchangeOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
+                    "asymmetric" => new QuarantineLitmus<AsymmetricOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
                     _ => UnknownImplementation(impl),
                 };
             }
 
             return impl switch
             {
-                "baseline" => new Litmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, protectedReclaimer).Run(),
-                "fullbarrier" => new Litmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, protectedReclaimer).Run(),
-                "interlocked" => new Litmus<InterlockedExchangeOps, TPattern>(rounds, deref, readerCore, reclaimerCore, protectedReclaimer).Run(),
-                "asymmetric" => new Litmus<AsymmetricOps, TPattern>(rounds, deref, readerCore, reclaimerCore, protectedReclaimer).Run(),
+                "baseline" => new Litmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
+                "fullbarrier" => new Litmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
+                "interlocked" => new Litmus<InterlockedExchangeOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
+                "asymmetric" => new Litmus<AsymmetricOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
                 _ => UnknownImplementation(impl),
             };
         }
@@ -363,7 +357,7 @@ namespace LightEpoch.Repro.Common
                 "usage: LightEpoch.Repro [--pattern <bare|resume-and-refresh>]\n" +
                 "       --impl <baseline|fullbarrier|interlocked|asymmetric>\n" +
                 "       [--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa]\n" +
-                "       [--quarantine] [--self-test] [--protected-reclaimer]\n" +
+                "       [--quarantine] [--self-test]\n" +
                 "       [--reader-core N --reclaimer-core N]   (single pair, manual pinning)\n" +
                 "--pattern selects the epoch sequence the reader runs per operation:\n" +
                 "  bare              Resume() -> access -> Suspend()   (isolates the Acquire announce)\n" +
@@ -380,10 +374,8 @@ namespace LightEpoch.Repro.Common
                 "--self-test implies --quarantine and poisons every round, proving the detector\n" +
                 "  can fire. It must report violations; if it does not, no clean --quarantine\n" +
                 "  result means anything.\n" +
-                "--protected-reclaimer makes the retiring thread hold an epoch (Resume + Refresh\n" +
-                "  each round), matching real Tsavorite usage. The default unprotected reclaimer\n" +
-                "  is a stress configuration: it removes the retiring thread from the safe-epoch\n" +
-                "  scan, which maximizes the race window.\n" +
+                "The retiring thread always holds an epoch and refreshes it each round, the way\n" +
+                "  Tsavorite drives the epoch in production; BumpCurrentEpoch asserts that.\n" +
                 "exit 0 = survived; nonzero/aborted = fault observed.");
         }
     }

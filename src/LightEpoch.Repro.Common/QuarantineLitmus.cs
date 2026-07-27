@@ -59,16 +59,14 @@ namespace LightEpoch.Repro.Common
         private readonly int readerCore;
         private readonly int reclaimerCore;
         private readonly bool selfTest;
-        private readonly bool protectedReclaimer;
 
-        public QuarantineLitmus(long rounds, int deref, int readerCore, int reclaimerCore, bool selfTest = false, bool protectedReclaimer = false)
+        public QuarantineLitmus(long rounds, int deref, int readerCore, int reclaimerCore, bool selfTest = false)
         {
             this.rounds = rounds;
             this.deref = deref;
             this.readerCore = readerCore;
             this.reclaimerCore = reclaimerCore;
             this.selfTest = selfTest;
-            this.protectedReclaimer = protectedReclaimer;
             ops = new TOps();
             pattern = new TPattern();
             firstViolationRound = -1;
@@ -161,10 +159,13 @@ namespace LightEpoch.Repro.Common
             }
         }
 
+        // BumpCurrentEpoch asserts ThisInstanceProtected(), so the retiring thread holds
+        // an epoch and refreshes it every round, the way Tsavorite drives the epoch in
+        // production. Retiring from an unprotected thread would leave it out of the
+        // safe-epoch scan and widen the race window past anything real code can produce.
         private void ReclaimerLoop()
         {
-            if (protectedReclaimer)
-                ops.Resume();
+            ops.Resume();
 
             for (long round = 0; round < rounds; round++)
             {
@@ -185,15 +186,13 @@ namespace LightEpoch.Repro.Common
                     Quarantine((long)page);
 
                 ops.BumpCurrentEpoch(drainCallbacks[round % PoolPages]);
-                if (protectedReclaimer)
-                    ops.Refresh();
+                ops.Refresh();
                 drains++;
 
                 EndBarrier();
             }
 
-            if (protectedReclaimer)
-                ops.Suspend();
+            ops.Suspend();
         }
 
         // Stands in for the unmap: the epoch has decided this page is safe to recycle, so
