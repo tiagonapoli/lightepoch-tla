@@ -20,6 +20,13 @@
 (* This is the same defect as MODULE LightEpoch, but proved against the     *)
 (* real per-operation API shape rather than a single bare announce.         *)
 (*                                                                         *)
+(* The reclaimer is PROTECTED, exactly as in Tsavorite: BumpCurrentEpoch    *)
+(* asserts ThisInstanceProtected(), so the retiring thread owns an epoch    *)
+(* slot (mem.lceRc) and refreshes it every round. That slot participates in *)
+(* the ComputeNewSafeToReclaimEpoch min-scan and therefore clamps the safe  *)
+(* epoch. Modeling the reclaimer as unprotected would leave it out of the   *)
+(* scan and widen the window past anything real code can produce.          *)
+(*                                                                         *)
 (* Expected: NoUseAfterFree is VIOLATED.                                   *)
 (***************************************************************************)
 EXTENDS Naturals, Sequences
@@ -44,13 +51,13 @@ ApplyAll(m, s) == IF s = <<>> THEN m
                   ELSE ApplyAll([m EXCEPT ![Head(s).f] = Head(s).v], Tail(s))
 
 Init ==
-    /\ mem = [ ce |-> 1, lce |-> 0, ret |-> FALSE, freed |-> FALSE ]
+    /\ mem = [ ce |-> 1, lce |-> 0, lceRc |-> 0, ret |-> FALSE, freed |-> FALSE ]
     /\ sb = [ p \in Procs |-> <<>> ]
     /\ holds = FALSE
     /\ eRead = 0
     /\ gRetire = 0
     /\ pcRd = "acq"
-    /\ pcRc = "retire"
+    /\ pcRc = "acqRc"
 
 \* Asynchronous store-buffer drain (FIFO): one buffered write becomes visible.
 FlushOne(p) ==
@@ -98,6 +105,15 @@ Rel ==
     /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRc>>
 
 \* Reclaimer ------------------------------------------------------------------
+\* Resume()/Acquire on the reclaimer itself: BumpCurrentEpoch asserts
+\* ThisInstanceProtected(), so the retiring thread holds its own epoch slot.
+\* Same plain announce store as the reader's, so it buffers too.
+AcqRc ==
+    /\ pcRc = "acqRc"
+    /\ sb' = [sb EXCEPT ![Rc] = Append(sb[Rc], [f |-> "lceRc", v |-> Load(Rc, "ce")])]
+    /\ pcRc' = "retire"
+    /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRd>>
+
 Retire ==
     /\ pcRc = "retire"
     /\ sb' = [sb EXCEPT ![Rc] = Append(sb[Rc], [f |-> "ret", v |-> TRUE])]
@@ -111,15 +127,32 @@ Bump ==
        IN /\ mem' = [m1 EXCEPT !.ce = m1.ce + 1]
           /\ gRetire' = m1.ce
     /\ sb' = [sb EXCEPT ![Rc] = <<>>]
-    /\ pcRc' = "compute"
+    /\ pcRc' = "refreshRc"
     /\ UNCHANGED <<holds, eRead, pcRd>>
 
-\* ComputeNewSafeToReclaimEpoch scan: reads mem.lce (may still be 0 if the
-\* reader's announce(s) are buffered) and, if the retire epoch is safe, FREES.
+\* Refresh() -> ProtectAndDrain on the reclaimer: re-announce its own slot at
+\* the new CurrentEpoch before scanning. Plain store, so it may still be
+\* buffered when the scan below reads it back (store forwarding applies).
+RefreshRc ==
+    /\ pcRc = "refreshRc"
+    /\ sb' = [sb EXCEPT ![Rc] = Append(sb[Rc], [f |-> "lceRc", v |-> Load(Rc, "ce")])]
+    /\ pcRc' = "compute"
+    /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRd>>
+
+\* ComputeNewSafeToReclaimEpoch scan (LightEpoch.cs):
+\*   oldest = CurrentEpoch; for each entry: if (e != 0 && e < oldest) oldest = e;
+\*   SafeToReclaimEpoch = oldest - 1;
+\* The reader's slot is read from memory (remote core, may still be 0 if its
+\* announce is buffered); the reclaimer reads its OWN slot with store
+\* forwarding. The reclaimer's entry clamps the min but does not close the
+\* window: after Bump the reclaimer sits at ce, so safe still covers gRetire.
 Compute ==
     /\ pcRc = "compute"
-    /\ LET lceVal == mem.lce
-           oldest == IF lceVal > 0 THEN Min(mem.ce, lceVal) ELSE mem.ce
+    /\ LET ceVal  == mem.ce
+           rdVal  == mem.lce
+           rcVal  == Load(Rc, "lceRc")
+           o1     == IF rdVal > 0 THEN Min(ceVal, rdVal) ELSE ceVal
+           oldest == IF rcVal > 0 THEN Min(o1, rcVal) ELSE o1
            safe   == oldest - 1
        IN IF gRetire <= safe
           THEN /\ mem' = [mem EXCEPT !.freed = TRUE]
@@ -128,7 +161,7 @@ Compute ==
     /\ UNCHANGED <<sb, holds, eRead, gRetire, pcRd>>
 
 Next == \/ Acq \/ Refresh \/ Cap \/ Use \/ Rel
-        \/ Retire \/ Bump \/ Compute
+        \/ AcqRc \/ Retire \/ Bump \/ RefreshRc \/ Compute
         \/ (\E p \in Procs : FlushOne(p))
 
 Spec == Init /\ [][Next]_vars
