@@ -176,10 +176,7 @@ namespace LightEpoch.Repro.Common
             var pattern = new TPattern();
             Console.WriteLine($"{pattern.Name} repro  impl={impl}  rounds={rounds:N0}  deref={deref}  pairs={pairs}");
             Console.WriteLine($"epoch sequence: {pattern.EpochSequence}");
-            Console.WriteLine(
-                $"OS={RuntimeInformation.OSDescription.Trim()}  " +
-                $"Arch={RuntimeInformation.ProcessArchitecture}  " +
-                $"{CoreTopology.Describe()}");
+            Console.WriteLine($"OS={RuntimeInformation.OSDescription.Trim()}  Arch={RuntimeInformation.ProcessArchitecture}  {CoreTopology.Describe()}");
             Console.WriteLine(quarantine
                 ? "detection: quarantine (page pool + poison sentinel; no syscall in the race loop)"
                 : "detection: unmap (VirtualFree MEM_RELEASE; a fault is a hardware access violation)");
@@ -216,10 +213,7 @@ namespace LightEpoch.Repro.Common
                 return 2;
             }
 
-            Console.WriteLine(
-                $"core selection: one logical processor per physical core" +
-                (crossNuma ? ", pairs straddle NUMA nodes" : string.Empty) +
-                (seed.HasValue ? $" (shuffled, seed={seed.Value})" : " (in enumeration order)"));
+            Console.WriteLine($"core selection: one logical processor per physical core" + (crossNuma ? ", pairs straddle NUMA nodes" : string.Empty) + (seed.HasValue ? $" (shuffled, seed={seed.Value})" : " (in enumeration order)"));
 
             return RunPairs<TPattern>(impl, rounds, deref, pairs, selected, quarantine, selfTest);
         }
@@ -231,10 +225,7 @@ namespace LightEpoch.Repro.Common
                 if (Array.IndexOf(core.LogicalProcessors, reclaimerCore) >= 0 &&
                     Array.IndexOf(core.LogicalProcessors, readerCore) >= 0)
                 {
-                    Console.Error.WriteLine(
-                        $"WARNING: logical processors {reclaimerCore} and {readerCore} are SMT siblings of one " +
-                        "physical core. They share a store buffer, so the Store-Buffer window this repro " +
-                        "depends on cannot open and a non-fault proves nothing.");
+                    Console.Error.WriteLine($"WARNING: logical processors {reclaimerCore} and {readerCore} are SMT siblings of one physical core. They share a store buffer, so the Store-Buffer window this repro depends on cannot open and a non-fault proves nothing.");
                     return;
                 }
             }
@@ -348,15 +339,13 @@ namespace LightEpoch.Repro.Common
 
         private static int UnknownImplementation(string impl)
         {
-            Console.Error.WriteLine(
-                $"unknown --impl '{impl}' (want: baseline|fullbarrier|interlocked|asymmetric)");
+            Console.Error.WriteLine($"unknown --impl '{impl}' (want: baseline|fullbarrier|interlocked|asymmetric)");
             return 2;
         }
 
         private static int UnknownPattern(string pattern)
         {
-            Console.Error.WriteLine(
-                $"unknown --pattern '{pattern}' (want: bare|resume-and-refresh)");
+            Console.Error.WriteLine($"unknown --pattern '{pattern}' (want: bare|resume-and-refresh)");
             return 2;
         }
 

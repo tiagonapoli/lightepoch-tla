@@ -104,20 +104,14 @@ namespace LightEpoch.Repro.Common
             long sampled = Volatile.Read(ref observedPages);
             if (observed > 0)
             {
-                Console.Error.WriteLine(
-                    $"USE-AFTER-FREE: reader read a quarantined page while protected. " +
-                    $"violations={observed:N0} firstRound={Volatile.Read(ref firstViolationRound):N0} " +
-                    $"elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"USE-AFTER-FREE: reader read a quarantined page while protected. violations={observed:N0} firstRound={Volatile.Read(ref firstViolationRound):N0} elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
                 return 1;
             }
 
             // Rounds where the reader captured a live pointer before the reclaimer
             // unlinked it. If this is ~0 the race window was never sampled and a clean
             // result says nothing about the memory model.
-            Console.WriteLine(
-                $"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s " +
-                $"with NO violation. sampledRounds={sampled:N0} drains={Volatile.Read(ref drains):N0} " +
-                $"quarantined={Volatile.Read(ref quarantines):N0} sink={Volatile.Read(ref sink)}");
+            Console.WriteLine($"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s with NO violation. sampledRounds={sampled:N0} drains={Volatile.Read(ref drains):N0} quarantined={Volatile.Read(ref quarantines):N0} sink={Volatile.Read(ref sink)}");
             return 0;
         }
 
