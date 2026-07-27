@@ -5,19 +5,17 @@ bug in an epoch-based safe-memory-reclamation (SMR) scheme** called
 `LightEpoch`. The epoch *enter* (announce) path publishes a thread's current
 epoch with a **plain store and no StoreLoad fence**. This lets the reclaimer's
 "safe-to-reclaim" scan miss a live reader and free memory that the reader is about
-to dereference — readily on a weakly-ordered CPU (**ARM64**), and more rarely but
-still demonstrably on **x86-64**.
+to dereference. This happens reliably on a weakly-ordered CPU (**ARM64**), and more
+rarely — but still demonstrably — on **x86-64**.
 
 The bug is demonstrated in two complementary ways:
 
 1. **A running C# repro** (`src/`) that links the epoch implementation
    unmodified and lets the epoch machinery *itself* free the object. On real
-   Windows ARM64 the buggy build faults within seconds — reliably, though the
-   concurrency needed to open the window varies by microarchitecture — while the
-   fixed builds run indefinitely. On x86-64 the buggy build **also** reproduces — the
-   window is far narrower, and observing it requires a detection mode that does not
-   serialize the reader (see [Results](#results-reproduced-on-arm64-and-x86-64) below).
-2. **Formal TLA+ models** (`tla/`) of the x86-TSO and ARM64 memory models, and
+   Windows ARM64 the buggy build faults within seconds, while the fixed builds run
+   indefinitely. On x86-64 the buggy build also reproduces, in a smaller window
+   (see [Results](#results-reproduced-on-arm64-and-x86-64) below).
+2. **Formal TLA+ models** (`tla/`) of the x86-TSO (total store order) and ARM64 memory models, and
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
    use-after-free in the baseline and proves each fix closes it.
 
@@ -32,9 +30,10 @@ The bug is demonstrated in two complementary ways:
 Every number below is from real hardware (Azure VMs and a local workstation),
 running the **unmodified** epoch implementation, with the epoch's own
 `BumpCurrentEpoch` → `ComputeNewSafeToReclaimEpoch` → drain logic deciding when to
-free. The harness never frees anything on its own. Both repro variants are covered:
-`--pattern bare` (`Resume()` → access → `Suspend()`) and `--pattern resume-and-refresh`, which mirrors a
-Tsavorite `BasicContext` operation ([§8](#8-how-tsavorite-actually-uses-lightepoch)).
+free. The harness never frees anything on its own. There are two different patterns of
+using the epoch API, and both are covered: `--pattern bare` (`Resume()` → access →
+`Suspend()`) and `--pattern resume-and-refresh`, which mirrors a Tsavorite
+`BasicContext` operation ([§8](#8-how-tsavorite-actually-uses-lightepoch)).
 
 ### Hardware under test
 
@@ -75,22 +74,22 @@ System.AccessViolationException: Attempted to read or write protected memory.
    at System.Threading.Thread.StartCallback()
 ```
 
-Two things about concurrency are worth noting. First, **more pairs is not
-monotonically better**: 2 pairs is the sweet spot on both repros, and 3 pairs takes
-longer to fault (`bare`, 15 s → 113 s) or does not fault within the cap
-(`resume-and-refresh`). Extra pairs add scheduling jitter that de-aligns the
-per-round barrier, so the two threads' store/load windows overlap less precisely.
-Second, on Neoverse-N1 a **single** litmus pair never faulted in 120 s while **two**
-faulted in 15 s; Neoverse-N2 (Cobalt 100) faults with a single pair. The reordering
-is architecturally permitted on both — N1 simply has a narrower window.
+One thing about concurrency is worth noting: **more pairs is not monotonically
+better**. 2 pairs is the sweet spot on both repros, and 3 pairs takes longer to fault
+(`bare`, 15 s → 113 s) or does not fault within the cap (`resume-and-refresh`). Extra
+pairs add scheduling jitter that de-aligns the per-round barrier, so the two threads'
+store/load windows overlap less precisely.
 
 ### x86-64 — logical use-after-free detection
 
-x86 needs a different detection mechanism, because the unmap used on ARM64 forces a
-TLB-shootdown IPI that serializes the reader and destroys the very window under test
+x86 needs a different detection mechanism, because the memory unmap used on ARM64
+forces a TLB-shootdown IPI that introduces a memory barrier on the reader and
+destroys the very window under test
 (the full explanation is
 [Appendix A](#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
-With `--quarantine`, counts are use-after-free **reads** observed:
+So instead the `--quarantine` mode is used: a poison value is written into the page
+being reclaimed, which allows a use-after-free to be detected without unmapping
+anything. Counts below are use-after-free **reads** observed:
 
 | CPU | Pattern | NUMA placement | Impl | Pairs violating | Violations |
 |---|---|---|---|---|---|
@@ -105,13 +104,6 @@ With `--quarantine`, counts are use-after-free **reads** observed:
 | Xeon 8272CL (**2 nodes**) | `bare` | pairs straddle nodes | `fullbarrier` | 0 / 30 | 0 |
 | Xeon 8272CL (**2 nodes**) | `bare` | single node | `fullbarrier` | 0 / 30 | 0 |
 
-For contrast, the **same Xeon with unmap detection** — 8 pairs / 16 threads, both
-NUMA placements, `baseline` and `fullbarrier` alike — produced zero faults in 300 s.
-The measurement, not the hardware, was hiding the bug.
-
-Cross-NUMA is at most a mild amplifier (3/30 vs 1/30 pairs), not the
-order-of-magnitude effect one might expect from inter-socket latency.
-
 ### What this establishes
 
 * The unfenced announce is **unsound on both architectures**, matching the TLA+
@@ -121,8 +113,6 @@ order-of-magnitude effect one might expect from inter-socket latency.
   and never faulted or violated; `interlocked` and `asymmetric` were additionally
   clean across all x86-64 quarantine runs. The buggy build failed on both
   architectures under exactly the same conditions.
-* The difference between the architectures is **frequency, not legality**: seconds
-  to a hard fault on ARM64, versus tens of events across tens of pair-runs on x86-64.
 
 ---
 
@@ -134,23 +124,29 @@ reclamation policy of its own.
 
 ### The shared race (both architectures)
 
-Each **litmus pair** is one reader thread and one reclaimer thread, pinned to two
-distinct physical cores. Per round, a two-phase sense-reversing barrier releases both
-threads simultaneously so their store/load windows overlap:
+Each **litmus pair** — a litmus test is a minimal two-thread program written to expose
+one specific memory-ordering behaviour — is one reader thread and one reclaimer
+thread, pinned to two distinct physical cores. Per round, a two-phase reusable barrier
+releases both threads simultaneously so their store/load windows overlap:
 
 ```
-reclaimer                                  reader
----------                                  ------
-page = allocate(4 KB)
-fill page with known values
-publish curPage = page
---------------------- StartBarrier ---------------------
-curPage = 0            (unlink)            Resume()      <- announce store, NO fence
-BumpCurrentEpoch(free page)                read curPage
-  Interlocked.Increment(CurrentEpoch)      dereference the page ~20,000 times
-  ComputeNewSafeToReclaimEpoch()  <- scan  Suspend()
-  if deemed safe -> free/poison the page
---------------------- EndBarrier -----------------------
+        RECLAIMER thread                          READER thread
+        ────────────────                          ─────────────
+setup   page = allocate(4 KB)
+        fill page with known values
+        publish curPage = page
+
+        ═════════ StartBarrier: both threads released together ═════════
+
+race    curPage = 0  (unlink the page)           Resume()
+                                                   └─ announce store, NO FENCE  ← the bug
+        BumpCurrentEpoch(onDrain: free page)     p = read curPage
+          └─ Interlocked.Increment(CurrentEpoch)
+          └─ ComputeNewSafeToReclaimEpoch()      dereference p ~20,000 times
+               └─ scans every thread's slot
+          └─ if deemed safe: free/poison page    Suspend()
+
+        ═════════ EndBarrier: wait for both, then next round ═════════
 ```
 
 The reclaimer side is already correctly fenced (`Interlocked.Increment` is a full
@@ -160,11 +156,14 @@ before the reader's announce became visible, so the scan concluded no reader was
 protected and the page was freed while the reader was still inside its critical
 section.
 
-`--pairs N` runs N such pairs concurrently on 2N distinct physical cores; `--seed`
-shuffles which cores are used; `--cross-numa` forces the reclaimer and reader of each
-pair onto **different NUMA nodes**.
+The repro harness has these flags for distributing the reader-reclaimer pairs across
+the machine:
 
-### ARM64 method — real unmapping, hardware verdict
+* `--pairs N` — runs N reader-reclaimer pairs concurrently on 2N distinct physical cores.
+* `--seed S` — shuffles which cores are used.
+* `--cross-numa` — forces the reclaimer and the reader of each pair onto **different NUMA nodes**.
+
+### ARM64 method — detection by real memory unmapping
 
 * `WindowsNative.Alloc` = `VirtualAlloc` of a whole 4 KB page;
   `WindowsNative.Free` = `VirtualFree(..., MEM_RELEASE)`, a **full unmap**.
@@ -719,7 +718,7 @@ Two design choices ensure the harness measures the epoch, not itself:
   per struct and inlines `Resume`/`Suspend`/`BumpCurrentEpoch` down to the
   concrete epoch calls, so there is no virtual-call barrier or indirection
   sitting between the announce store and the object load.
-* **A two-phase sense-reversing barrier** (`StartBarrier`/`EndBarrier`) realigns
+* **A two-phase reusable barrier** (`StartBarrier`/`EndBarrier`) realigns
   the two threads every round so their store/load windows overlap on real
   hardware — without this the two loops drift and the window is rarely hit. The
   barrier brackets the race region; it is *outside* the announce→deref window, so
