@@ -37,13 +37,13 @@ namespace LightEpoch.Repro.Common
     }
 
     /// <summary>
-    /// Epoch portion of Garnet's normal Tsavorite BasicContext operation.
+    /// Epoch portion of a normal Tsavorite BasicContext operation.
     /// ClientSession.UnsafeResumeThread calls Resume and then InternalRefresh;
     /// InternalRefresh begins with ProtectAndDrain, represented by Refresh here.
     /// </summary>
-    public readonly struct GarnetBasicContextReproPattern : IReproPattern
+    public readonly struct TsavoriteBasicContextReproPattern : IReproPattern
     {
-        public string Name => "Garnet Tsavorite BasicContext";
+        public string Name => "Tsavorite BasicContext";
         public string EpochSequence => "Resume() -> InternalRefresh()/ProtectAndDrain() -> access -> Suspend()";
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

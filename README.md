@@ -290,7 +290,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   │   ├── UtilityShim.cs · EpochOps.cs
 │   ├── LightEpoch.Repro.Common/     # shared, self-judging litmus harness
 │   ├── LightEpoch.Repro.Bare/       # Resume -> access -> Suspend
-│   └── LightEpoch.Repro.Garnet/     # Garnet BasicContext epoch sequence
+│   └── LightEpoch.Repro.Tsavorite/  # Tsavorite BasicContext epoch sequence
 └── tla/
     ├── memory-models/               # the memory models themselves
     │   ├── X86TSO.tla · ARM64.tla
@@ -321,14 +321,14 @@ They differ only in the epoch sequence immediately before the shared access:
 | Project | Reader sequence per operation | Purpose |
 |---|---|---|
 | `LightEpoch.Repro.Bare` | `Resume()` → access → `Suspend()` | Minimal reproduction of the Acquire announce bug |
-| `LightEpoch.Repro.Garnet` | `Resume()` → `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()` | Epoch portion of Garnet's normal Tsavorite `BasicContext` operation |
+| `LightEpoch.Repro.Tsavorite` | `Resume()` → `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()` | Epoch portion of a normal Tsavorite `BasicContext` operation |
 
 Run on Windows with a .NET 10 SDK:
 
 ```bash
 DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Bare -c Release -- \
   --impl baseline --rounds 200000000
-DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Garnet -c Release -- \
+DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Tsavorite -c Release -- \
   --impl baseline --rounds 200000000
 ```
 
@@ -336,7 +336,7 @@ Exit code `0` = survived (no reclaim while a protected reader held the page);
 an access-violation termination (`0xC0000005`) = a fault was observed. On
 Windows ARM64,
 both baseline repros fault; the fixed implementations survive. See §8 for the
-upstream Garnet call-path evidence.
+Tsavorite call sequence.
 
 ### 5.2 The TLA+ models
 
@@ -394,7 +394,7 @@ genuinely separate hardware:
       read pg[0..deref] // <-- faults here if the page was unmapped
   ops.Suspend();
   ```
-  The Garnet repro inserts `ops.Refresh()` between `Resume()` and the pointer
+  The Tsavorite repro inserts `ops.Refresh()` between `Resume()` and the pointer
   load, matching `UnsafeResumeThread`'s `Resume()` + `InternalRefresh()` epoch
   sequence. `InternalRefresh()` begins with `ProtectAndDrain()`, which performs
   the second announce represented by `ops.Refresh()`.
@@ -492,26 +492,10 @@ clean run is whether the announce store carries a StoreLoad fence.
 The safety impact depends on **how often Tsavorite enters the epoch** and which
 announce path it uses, so it is worth being precise about the call pattern.
 
-This was verified against Garnet `main` commit
-[`b6f14b9967089951e1065a61e7175cb28f1cf34f`](https://github.com/microsoft/garnet/tree/b6f14b9967089951e1065a61e7175cb28f1cf34f):
-
-* [`BasicGarnetApi`](https://github.com/microsoft/garnet/blob/b6f14b9967089951e1065a61e7175cb28f1cf34f/libs/GlobalUsings.cs)
-  is backed by Tsavorite `BasicContext` instances.
-* [`BasicContext`](https://github.com/microsoft/garnet/blob/b6f14b9967089951e1065a61e7175cb28f1cf34f/libs/storage/Tsavorite/cs/src/core/ClientSession/BasicContext.cs)
-  brackets each normal read/upsert/RMW/delete with
-  `UnsafeResumeThread()`/`UnsafeSuspendThread()`.
-* [`UnsafeResumeThread`](https://github.com/microsoft/garnet/blob/b6f14b9967089951e1065a61e7175cb28f1cf34f/libs/storage/Tsavorite/cs/src/core/ClientSession/ClientSession.cs)
-  calls `epoch.Resume()` and then `store.InternalRefresh(...)`.
-* [`InternalRefresh`](https://github.com/microsoft/garnet/blob/b6f14b9967089951e1065a61e7175cb28f1cf34f/libs/storage/Tsavorite/cs/src/core/Index/Tsavorite/TsavoriteThread.cs)
-  begins with `epoch.ProtectAndDrain()`.
-
-Normal GET/SET/RMW/DELETE operations therefore acquire and release the storage
-epoch per operation; Garnet does not hold that epoch across the RESP command
-loop. Specialized pointer-stability operations such as BITOP are an exception:
-they use `TransactionalUnsafeContext.BeginUnsafe()`/`EndUnsafe()` to hold the
-epoch across multiple reads, releasing it around pending I/O. Garnet's separate
-cluster-state epoch around request processing is not this Tsavorite storage
-epoch.
+Tsavorite `BasicContext` brackets each normal read/upsert/RMW/delete with
+`UnsafeResumeThread()`/`UnsafeSuspendThread()`. `UnsafeResumeThread()` calls
+`epoch.Resume()` followed by `store.InternalRefresh(...)`, whose first epoch
+operation is `epoch.ProtectAndDrain()`.
 
 `LightEpoch` exposes two very different ways to protect work:
 
@@ -617,7 +601,7 @@ operation":
   epoch straight past a live reader. The default `BasicContext` API therefore
   **re-opens the "absent reader" window on every single operation** — which is
   why both dedicated baseline repros fault within seconds on ARM64 (§8.5). The
-  additional `ProtectAndDrain()` announce in the Garnet sequence is another
+  additional `ProtectAndDrain()` announce in the Tsavorite sequence is another
   plain store; it does not provide the missing StoreLoad ordering.
 
 ### 8.4 Why acquire + release on every operation? (theories)
@@ -664,7 +648,7 @@ it best.
 The default `BasicContext` sequence is exercised by both the executable repro
 and the formal model:
 
-* **Repros.** `LightEpoch.Repro.Garnet` runs the epoch-critical
+* **Repros.** `LightEpoch.Repro.Tsavorite` runs the epoch-critical
   `UnsafeResumeThread` (`Resume()` + `InternalRefresh()`/`ProtectAndDrain()`) …
   `UnsafeSuspendThread` sequence per operation. `LightEpoch.Repro.Bare` omits
   only the refresh to isolate the original Acquire announce. On ARM64
@@ -675,7 +659,7 @@ and the formal model:
   | Project | baseline | fullbarrier | interlocked | asymmetric |
   |---|---|---|---|---|
   | `LightEpoch.Repro.Bare` | **access violation** | survives | survives | survives |
-  | `LightEpoch.Repro.Garnet` | **access violation** | survives | survives | survives |
+  | `LightEpoch.Repro.Tsavorite` | **access violation** | survives | survives | survives |
 
 * **TLA+ (`LightEpochTsavorite` / `FixedLightEpochTsavorite`).** The per-op
   `Acquire`-announce → `ProtectAndDrain`-announce → operation-load → `Release`
