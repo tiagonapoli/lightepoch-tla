@@ -72,9 +72,7 @@ namespace LightEpoch.Repro.Common
 
             stop = true;
             reader.Join(2000);
-            Console.WriteLine(
-                $"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s " +
-                $"with NO fault. sink={Volatile.Read(ref sink)}");
+            Console.WriteLine($"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s with NO fault. sink={Volatile.Read(ref sink)}");
             return 0;
         }
 

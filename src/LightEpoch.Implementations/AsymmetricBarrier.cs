@@ -30,8 +30,7 @@ namespace LightEpoch.Core
         public static void FullBarrierAllCores()
         {
             if (!OperatingSystem.IsWindows())
-                throw new PlatformNotSupportedException(
-                    "The asymmetric barrier requires Windows FlushProcessWriteBuffers.");
+                throw new PlatformNotSupportedException("The asymmetric barrier requires Windows FlushProcessWriteBuffers.");
 
             FlushProcessWriteBuffers();
         }

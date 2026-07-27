@@ -54,8 +54,7 @@ namespace LightEpoch.Repro.Common
         {
             int affinityBits = UIntPtr.Size * 8;
             if ((uint)core >= affinityBits)
-                throw new ArgumentOutOfRangeException(
-                    nameof(core), core, $"Core must be in the current processor group (0-{affinityBits - 1}).");
+                throw new ArgumentOutOfRangeException(nameof(core), core, $"Core must be in the current processor group (0-{affinityBits - 1}).");
 
             UIntPtr mask = (UIntPtr)(1UL << core);
             if (SetThreadAffinityMask(GetCurrentThread(), mask) == UIntPtr.Zero)

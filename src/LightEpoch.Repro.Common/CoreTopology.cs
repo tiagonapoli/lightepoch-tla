@@ -82,8 +82,7 @@ namespace LightEpoch.Repro.Common
                         {
                             int representative = logicalProcessors[0];
                             numaByLogicalProcessor.TryGetValue(representative, out int numaNode);
-                            cores.Add(new PhysicalCore(
-                                representative, logicalProcessors.ToArray(), efficiencyClass, numaNode));
+                            cores.Add(new PhysicalCore(representative, logicalProcessors.ToArray(), efficiencyClass, numaNode));
                         }
                     }
 
@@ -175,8 +174,7 @@ namespace LightEpoch.Repro.Common
 
             pool ??= new List<PhysicalCore>(cores);
             if (pool.Count < count)
-                throw new InvalidOperationException(
-                    $"need {count} distinct physical cores but only {pool.Count} are available");
+                throw new InvalidOperationException($"need {count} distinct physical cores but only {pool.Count} are available");
 
             var candidates = new List<int>();
             foreach (var core in pool)
@@ -214,8 +212,7 @@ namespace LightEpoch.Repro.Common
             var nodes = new List<int>(byNode.Keys);
             nodes.Sort();
             if (nodes.Count < 2)
-                throw new InvalidOperationException(
-                    $"--cross-numa needs at least 2 NUMA nodes but this machine reports {nodes.Count}");
+                throw new InvalidOperationException($"--cross-numa needs at least 2 NUMA nodes but this machine reports {nodes.Count}");
 
             var random = seed.HasValue ? new Random(seed.Value) : null;
             if (random != null)

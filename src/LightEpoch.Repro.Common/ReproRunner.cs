@@ -224,8 +224,7 @@ namespace LightEpoch.Repro.Common
             return RunPairs<TPattern>(impl, rounds, deref, pairs, selected, quarantine, selfTest);
         }
 
-        private static void WarnIfSamePhysicalCore(
-            IReadOnlyList<CoreTopology.PhysicalCore> physicalCores, int reclaimerCore, int readerCore)
+        private static void WarnIfSamePhysicalCore(IReadOnlyList<CoreTopology.PhysicalCore> physicalCores, int reclaimerCore, int readerCore)
         {
             foreach (var core in physicalCores)
             {
@@ -264,11 +263,8 @@ namespace LightEpoch.Repro.Common
                 int readerCore = cores[(2 * p) + 1];
                 numaByLogicalProcessor.TryGetValue(reclaimerCore, out int reclaimerNode);
                 numaByLogicalProcessor.TryGetValue(readerCore, out int readerNode);
-                Console.WriteLine(
-                    $"pair {p}: cores(reclaimer={reclaimerCore}[numa{reclaimerNode}]," +
-                    $"reader={readerCore}[numa{readerNode}])");
-                var t = new Thread(() => exitCodes[pairIndex] =
-                    RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest))
+                Console.WriteLine($"pair {p}: cores(reclaimer={reclaimerCore}[numa{reclaimerNode}],reader={readerCore}[numa{readerNode}])");
+                var t = new Thread(() => exitCodes[pairIndex] = RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest))
                 {
                     IsBackground = false,
                     Name = $"pair{p}"
@@ -289,8 +285,7 @@ namespace LightEpoch.Repro.Common
             return 0;
         }
 
-        private static int RunSingle<TPattern>(
-            string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest)
+        private static int RunSingle<TPattern>(string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest)
             where TPattern : struct, IReproPattern
         {
             if (quarantine)
