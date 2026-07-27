@@ -59,14 +59,16 @@ namespace LightEpoch.Repro.Common
         private readonly int readerCore;
         private readonly int reclaimerCore;
         private readonly bool selfTest;
+        private readonly bool protectedReclaimer;
 
-        public QuarantineLitmus(long rounds, int deref, int readerCore, int reclaimerCore, bool selfTest = false)
+        public QuarantineLitmus(long rounds, int deref, int readerCore, int reclaimerCore, bool selfTest = false, bool protectedReclaimer = false)
         {
             this.rounds = rounds;
             this.deref = deref;
             this.readerCore = readerCore;
             this.reclaimerCore = reclaimerCore;
             this.selfTest = selfTest;
+            this.protectedReclaimer = protectedReclaimer;
             ops = new TOps();
             pattern = new TPattern();
             firstViolationRound = -1;
@@ -161,6 +163,9 @@ namespace LightEpoch.Repro.Common
 
         private void ReclaimerLoop()
         {
+            if (protectedReclaimer)
+                ops.Resume();
+
             for (long round = 0; round < rounds; round++)
             {
                 byte* page = pool + ((nuint)(round % PoolPages) * PageSize);
@@ -180,10 +185,15 @@ namespace LightEpoch.Repro.Common
                     Quarantine((long)page);
 
                 ops.BumpCurrentEpoch(drainCallbacks[round % PoolPages]);
+                if (protectedReclaimer)
+                    ops.Refresh();
                 drains++;
 
                 EndBarrier();
             }
+
+            if (protectedReclaimer)
+                ops.Suspend();
         }
 
         // Stands in for the unmap: the epoch has decided this page is safe to recycle, so

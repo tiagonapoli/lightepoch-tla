@@ -42,13 +42,15 @@ namespace LightEpoch.Repro.Common
         private readonly int deref;
         private readonly int readerCore;
         private readonly int reclaimerCore;
+        private readonly bool protectedReclaimer;
 
-        public Litmus(long rounds, int deref, int readerCore, int reclaimerCore)
+        public Litmus(long rounds, int deref, int readerCore, int reclaimerCore, bool protectedReclaimer = false)
         {
             this.rounds = rounds;
             this.deref = deref;
             this.readerCore = readerCore;
             this.reclaimerCore = reclaimerCore;
+            this.protectedReclaimer = protectedReclaimer;
             ops = new TOps();
             pattern = new TPattern();
         }
@@ -108,6 +110,9 @@ namespace LightEpoch.Repro.Common
 
         private void ReclaimerLoop()
         {
+            if (protectedReclaimer)
+                ops.Resume();
+
             for (long round = 0; round < rounds; round++)
             {
                 byte* page = WindowsNative.Alloc(PageSize);
@@ -120,9 +125,14 @@ namespace LightEpoch.Repro.Common
                 curPage = 0;
                 long pageAddress = (long)page;
                 ops.BumpCurrentEpoch(() => WindowsNative.Free((byte*)pageAddress));
+                if (protectedReclaimer)
+                    ops.Refresh();
 
                 EndBarrier();
             }
+
+            if (protectedReclaimer)
+                ops.Suspend();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
