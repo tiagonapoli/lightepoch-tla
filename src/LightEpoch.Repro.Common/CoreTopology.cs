@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 
 namespace LightEpoch.Repro.Common
@@ -37,8 +38,10 @@ namespace LightEpoch.Repro.Common
         }
 
         /// <summary>
-        /// Enumerates physical cores. Falls back to treating every logical
-        /// processor as its own core if the OS query fails.
+        /// Enumerates physical cores. Throws if the OS query fails: without real
+        /// topology the harness cannot tell SMT siblings apart, and a run that
+        /// unknowingly pins both threads to one physical core reports "no fault"
+        /// for the wrong reason.
         /// </summary>
         public static IReadOnlyList<PhysicalCore> Enumerate()
         {
@@ -47,13 +50,13 @@ namespace LightEpoch.Repro.Common
             uint length = 0;
             GetLogicalProcessorInformationEx(RelationProcessorCore, IntPtr.Zero, ref length);
             if (length == 0)
-                return Fallback();
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetLogicalProcessorInformationEx(RelationProcessorCore) did not report a buffer size.");
 
             IntPtr buffer = Marshal.AllocHGlobal((int)length);
             try
             {
                 if (!GetLogicalProcessorInformationEx(RelationProcessorCore, buffer, ref length))
-                    return Fallback();
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetLogicalProcessorInformationEx(RelationProcessorCore) failed.");
 
                 IntPtr cursor = buffer;
                 long end = buffer.ToInt64() + length;
@@ -92,7 +95,10 @@ namespace LightEpoch.Repro.Common
                 Marshal.FreeHGlobal(buffer);
             }
 
-            return cores.Count > 0 ? cores : Fallback();
+            if (cores.Count == 0)
+                throw new InvalidOperationException("GetLogicalProcessorInformationEx(RelationProcessorCore) reported no physical cores.");
+
+            return cores;
         }
 
         static Dictionary<int, int> NumaNodesByLogicalProcessor()
@@ -101,13 +107,13 @@ namespace LightEpoch.Repro.Common
             uint length = 0;
             GetLogicalProcessorInformationEx(RelationNumaNode, IntPtr.Zero, ref length);
             if (length == 0)
-                return map;
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetLogicalProcessorInformationEx(RelationNumaNode) did not report a buffer size.");
 
             IntPtr buffer = Marshal.AllocHGlobal((int)length);
             try
             {
                 if (!GetLogicalProcessorInformationEx(RelationNumaNode, buffer, ref length))
-                    return map;
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "GetLogicalProcessorInformationEx(RelationNumaNode) failed.");
 
                 IntPtr cursor = buffer;
                 long end = buffer.ToInt64() + length;
@@ -138,15 +144,6 @@ namespace LightEpoch.Repro.Common
             }
 
             return map;
-        }
-
-        static IReadOnlyList<PhysicalCore> Fallback()
-        {
-            var cores = new List<PhysicalCore>();
-            for (int i = 0; i < Environment.ProcessorCount && i < 64; i++)
-                cores.Add(new PhysicalCore(i, new[] { i }, 0, 0));
-
-            return cores;
         }
 
         /// <summary>
