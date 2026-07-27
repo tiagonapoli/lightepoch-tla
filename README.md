@@ -106,7 +106,7 @@ anything. Counts below are use-after-free **reads** observed:
 
 ### What this establishes
 
-* The unfenced announce is **unsound on both architectures**, matching the TLA+
+* The unfenced announce is **incorrect on both architectures**, matching the TLA+
   result (`X86TSO` and `ARM64` with no fence both **VIOLATED**).
 * **Every fix was clean under the conditions that broke the baseline.**
   `fullbarrier` was run on every machine and every configuration in the tables above
@@ -1035,7 +1035,7 @@ It does **not** mean x86-TSO forbids the reordering. It does not:
 
 So the correct claim is narrower than "x86 is safe":
 
-> The buggy announce is **unsound on x86-64**, but the *unmap-based* harness cannot
+> The buggy announce is **incorrect on x86-64**, but the *unmap-based* harness cannot
 > observe it there, because the unmap itself serializes the reader. x86 is quiet in
 > these runs as an artifact of the measurement, not as a property of the hardware.
 
