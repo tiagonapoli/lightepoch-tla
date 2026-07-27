@@ -18,6 +18,9 @@ StoreLoad ordering.
 ## Table of contents
 
 - [The common Store-Buffering test](#the-common-store-buffering-test)
+- [The four memory-order pairs](#the-four-memory-order-pairs)
+  - [Why StoreLoad matters to LightEpoch](#why-storeload-matters-to-lightepoch)
+  - [Architecture and compiler differences](#architecture-and-compiler-differences)
 - [Shared TLA+ representation](#shared-tla-representation)
   - [Store forwarding](#store-forwarding)
   - [Asynchronous propagation](#asynchronous-propagation)
@@ -91,6 +94,74 @@ Done => ~(r1 = 0 /\ r2 = 0)
 
 It does **not** claim that every behavior admitted by the module is
 sequentially consistent.
+
+## The four memory-order pairs
+
+Memory-order names describe two operations in **program order**. For example,
+StoreLoad means the source program performs a store and then a load:
+
+```text
+STORE A
+LOAD  B
+```
+
+A reordering means that other processors can observe an outcome that would
+require those operations to occur in the opposite order under sequential
+consistency. It does not necessarily mean the CPU literally swaps the
+instructions. Store buffers, speculative execution, cache propagation, and
+other implementation details can produce the same externally visible result.
+
+There are four load/store pairs:
+
+| Ordering | Program order | Meaning of the relaxation |
+|---|---|---|
+| **LoadLoad** | `LOAD A; LOAD B` | The value loaded from `B` can reflect an event that is not yet reflected by the load from `A`. |
+| **LoadStore** | `LOAD A; STORE B` | Other processors can observe the store to `B` without the ordering implied by the earlier load from `A`. |
+| **StoreStore** | `STORE A; STORE B` | Another processor can observe the store to `B` before it observes the store to `A`. |
+| **StoreLoad** | `STORE A; LOAD B` | The load from `B` can complete while the store to `A` is still not visible to other processors. |
+
+These names describe ordering guarantees, not every possible interaction.
+Same-address accesses, dependencies, atomic operations, memory types, and cache
+coherence add further rules. The clearest examples therefore use distinct
+ordinary memory locations `A` and `B`.
+
+### Why StoreLoad matters to LightEpoch
+
+The LightEpoch reader performs this pair:
+
+```text
+STORE localCurrentEpoch := CurrentEpoch   // announce reader
+LOAD  objectPointer                       // begin protected access
+```
+
+If StoreLoad ordering is absent, the pointer load can proceed while the epoch
+announcement remains buffered. A reclaimer on another processor can scan the
+reader's slot, still observe `0`, conclude that the reader is absent, and free
+the object that the reader is about to use.
+
+A release store does not close this window. Release semantics order operations
+that precede the release before the store; they do not order the release store
+before a later load. LightEpoch needs a full StoreLoad barrier, a suitable
+sequentially consistent atomic operation, or a correctly implemented
+process-wide barrier on the reclaimer side.
+
+### Architecture and compiler differences
+
+For ordinary cacheable memory, x86-TSO preserves the principal LoadLoad,
+LoadStore, and StoreStore orderings but permits the StoreLoad outcome through
+its store-buffer behavior. ARM64 has a weaker model and can admit all four
+classes when no dependency, atomic operation, or appropriate barrier supplies
+the missing order.
+
+CPU memory ordering is separate from compiler or JIT reordering. A compiler may
+move, combine, or remove memory operations unless the programming language
+requires them to remain observable. Correct concurrent code must therefore
+provide both:
+
+1. **language/compiler ordering**, through the appropriate volatile or atomic
+   primitives; and
+2. **hardware ordering**, through primitives whose generated instructions
+   provide the required architectural guarantee.
 
 ## Shared TLA+ representation
 
