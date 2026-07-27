@@ -16,9 +16,14 @@ namespace LightEpoch.Repro.Common
         [DllImport("kernel32")] static extern IntPtr GetCurrentThread();
         [DllImport("kernel32", SetLastError = true)] static extern UIntPtr SetThreadAffinityMask(IntPtr h, UIntPtr m);
 
+        static WindowsNative()
+        {
+            if (!OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("The repro is supported only on Windows.");
+        }
+
         public static byte* Alloc(nuint bytes)
         {
-            EnsureWindows();
             var pointer = VirtualAlloc(IntPtr.Zero, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_RW);
             if (pointer == IntPtr.Zero)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "VirtualAlloc failed.");
@@ -29,14 +34,12 @@ namespace LightEpoch.Repro.Common
         public static void Free(byte* p, nuint bytes)
         {
             _ = bytes;
-            EnsureWindows();
             if (!VirtualFree((IntPtr)p, 0, MEM_RELEASE))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "VirtualFree failed.");
         }
 
         public static void Pin(int core)
         {
-            EnsureWindows();
             int affinityBits = UIntPtr.Size * 8;
             if ((uint)core >= affinityBits)
                 throw new ArgumentOutOfRangeException(
@@ -45,12 +48,6 @@ namespace LightEpoch.Repro.Common
             UIntPtr mask = (UIntPtr)(1UL << core);
             if (SetThreadAffinityMask(GetCurrentThread(), mask) == UIntPtr.Zero)
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "SetThreadAffinityMask failed.");
-        }
-
-        static void EnsureWindows()
-        {
-            if (!OperatingSystem.IsWindows())
-                throw new PlatformNotSupportedException("The repro is supported only on Windows.");
         }
     }
 }
