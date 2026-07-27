@@ -58,7 +58,33 @@ namespace LightEpoch.Repro.Common
 
     public static class ReproRunner
     {
-        public static int Run<TPattern>(string[] args)
+        public static int Run(string[] args)
+        {
+            string pattern = "bare";
+            var forwarded = new List<string>(args.Length);
+            for (int i = 0; i < args.Length; i++)
+            {
+                if (args[i] != "--pattern")
+                {
+                    forwarded.Add(args[i]);
+                    continue;
+                }
+
+                if (i + 1 >= args.Length)
+                    return MissingValue("--pattern");
+
+                pattern = args[++i].ToLowerInvariant();
+            }
+
+            return pattern switch
+            {
+                "bare" => Run<BareReproPattern>(forwarded.ToArray()),
+                "resume-and-refresh" => Run<ResumeAndRefreshReproPattern>(forwarded.ToArray()),
+                _ => UnknownPattern(pattern),
+            };
+        }
+
+        static int Run<TPattern>(string[] args)
             where TPattern : struct, IReproPattern
         {
             string impl = "baseline";
@@ -332,15 +358,27 @@ namespace LightEpoch.Repro.Common
             return 2;
         }
 
+        static int UnknownPattern(string pattern)
+        {
+            Console.Error.WriteLine(
+                $"unknown --pattern '{pattern}' (want: bare|resume-and-refresh)");
+            return 2;
+        }
+
         static void Usage<TPattern>() where TPattern : struct, IReproPattern
         {
             var pattern = new TPattern();
             Console.WriteLine(
-                $"usage: {pattern.Name} --impl <baseline|fullbarrier|interlocked|asymmetric> " +
-                "[--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa]\n" +
+                "usage: LightEpoch.Repro [--pattern <bare|resume-and-refresh>]\n" +
+                "       --impl <baseline|fullbarrier|interlocked|asymmetric>\n" +
+                "       [--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa]\n" +
                 "       [--quarantine] [--self-test]\n" +
                 "       [--reader-core N --reclaimer-core N]   (single pair, manual pinning)\n" +
-                $"epoch sequence: {pattern.EpochSequence}\n" +
+                "--pattern selects the epoch sequence the reader runs per operation:\n" +
+                "  bare              Resume() -> access -> Suspend()   (isolates the Acquire announce)\n" +
+                "  resume-and-refresh  Resume() -> InternalRefresh()/ProtectAndDrain() -> access -> Suspend()\n" +
+                "                    (the epoch portion of a Tsavorite BasicContext operation)\n" +
+                $"selected: {pattern.Name} — {pattern.EpochSequence}\n" +
                 "Each pair runs a reader and a reclaimer, one per physical core (SMT siblings are\n" +
                 "never paired: they share a store buffer and the race window cannot open).\n" +
                 "--pairs defaults to 2 when at least 4 physical cores are available.\n" +

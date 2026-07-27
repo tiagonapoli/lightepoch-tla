@@ -9,7 +9,7 @@
     <LangVersion>latest</LangVersion>
     <Optimize>true</Optimize>
     <AssemblyName>LightEpoch.Repro</AssemblyName>
-    <RootNamespace>LightEpoch.Repro.ResumeAndRefresh</RootNamespace>
+    <RootNamespace>LightEpoch.Repro</RootNamespace>
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
     <TieredCompilation>false</TieredCompilation>

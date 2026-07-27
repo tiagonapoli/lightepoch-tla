@@ -39,7 +39,7 @@ Every number below is from real hardware (Azure VMs and a local workstation),
 running the **unmodified** epoch implementation, with the epoch's own
 `BumpCurrentEpoch` → `ComputeNewSafeToReclaimEpoch` → drain logic deciding when to
 free. The harness never frees anything on its own. Both repro variants are covered:
-`Bare` (`Resume()` → access → `Suspend()`) and `ResumeAndRefresh`, which mirrors a
+`--pattern bare` (`Resume()` → access → `Suspend()`) and `--pattern resume-and-refresh`, which mirrors a
 Tsavorite `BasicContext` operation ([§8](#8-how-tsavorite-actually-uses-lightepoch)).
 
 ### Hardware under test
@@ -62,14 +62,14 @@ process start; `SURVIVED` means the run was killed at the cap with no fault.
 
 | CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) |
 |---|---|---|---|---|
-| Cobalt 100 / N2 (4) | `Bare` | 2 (1 pair) | **FAULT @ 19 s** | SURVIVED 600 s |
-| Cobalt 100 / N2 (4) | `ResumeAndRefresh` | 4 (2 pairs) | **FAULT @ 29 s** | SURVIVED 300 s |
-| Ampere Altra / N1 (4) | `Bare` | 2 (1 pair) | no fault in 120 s | SURVIVED 600 s |
-| Ampere Altra / N1 (4) | `ResumeAndRefresh` | 4 (2 pairs) | no fault in 300 s | — |
-| Ampere Altra / N1 (8) | `Bare` | 4 (2 pairs) | **FAULT @ 15 s** | SURVIVED 300 s |
-| Ampere Altra / N1 (8) | `Bare` | 6 (3 pairs) | **FAULT @ 113 s** | SURVIVED 300 s |
-| Ampere Altra / N1 (8) | `ResumeAndRefresh` | 4 (2 pairs) | **FAULT @ 96 s** | SURVIVED 300 s |
-| Ampere Altra / N1 (8) | `ResumeAndRefresh` | 6 (3 pairs) | no fault in 300 s | — |
+| Cobalt 100 / N2 (4) | `bare` | 2 (1 pair) | **FAULT @ 19 s** | SURVIVED 600 s |
+| Cobalt 100 / N2 (4) | `resume-and-refresh` | 4 (2 pairs) | **FAULT @ 29 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (4) | `bare` | 2 (1 pair) | no fault in 120 s | SURVIVED 600 s |
+| Ampere Altra / N1 (4) | `resume-and-refresh` | 4 (2 pairs) | no fault in 300 s | — |
+| Ampere Altra / N1 (8) | `bare` | 4 (2 pairs) | **FAULT @ 15 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (8) | `bare` | 6 (3 pairs) | **FAULT @ 113 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (8) | `resume-and-refresh` | 4 (2 pairs) | **FAULT @ 96 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (8) | `resume-and-refresh` | 6 (3 pairs) | no fault in 300 s | — |
 
 Faulting stack, every time — the reader dereferencing a page the epoch already freed:
 
@@ -83,8 +83,8 @@ System.AccessViolationException: Attempted to read or write protected memory.
 
 Two things about concurrency are worth noting. First, **more pairs is not
 monotonically better**: 2 pairs is the sweet spot on both repros, and 3 pairs takes
-longer to fault (`Bare`, 15 s → 113 s) or does not fault within the cap
-(`ResumeAndRefresh`). Extra pairs add scheduling jitter that de-aligns the
+longer to fault (`bare`, 15 s → 113 s) or does not fault within the cap
+(`resume-and-refresh`). Extra pairs add scheduling jitter that de-aligns the
 per-round barrier, so the two threads' store/load windows overlap less precisely.
 Second, on Neoverse-N1 a **single** litmus pair never faulted in 120 s while **two**
 faulted in 15 s; Neoverse-N2 (Cobalt 100) faults with a single pair. The reordering
@@ -98,16 +98,18 @@ TLB-shootdown IPI that serializes the reader and destroys the very window under 
 [Appendix A](#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
 With `--quarantine`, counts are use-after-free **reads** observed:
 
-| CPU | NUMA placement | Impl | Pairs violating | Violations |
-|---|---|---|---|---|
-| i7-12700K (1 node) | same node | `baseline` | **5 / 40** | **59** |
-| i7-12700K (1 node) | same node | `fullbarrier` | 0 / 40 | 0 |
-| i7-12700K (1 node) | same node | `interlocked` | 0 / 40 | 0 |
-| i7-12700K (1 node) | same node | `asymmetric` | 0 / 40 | 0 |
-| Xeon 8272CL (**2 nodes**) | **pairs straddle nodes** | `baseline` | **3 / 30** | **6** |
-| Xeon 8272CL (**2 nodes**) | single node | `baseline` | **1 / 30** | **4** |
-| Xeon 8272CL (**2 nodes**) | pairs straddle nodes | `fullbarrier` | 0 / 30 | 0 |
-| Xeon 8272CL (**2 nodes**) | single node | `fullbarrier` | 0 / 30 | 0 |
+| CPU | Pattern | NUMA placement | Impl | Pairs violating | Violations |
+|---|---|---|---|---|---|
+| i7-12700K (1 node) | `bare` | same node | `baseline` | **5 / 40** | **59** |
+| i7-12700K (1 node) | `bare` | same node | `fullbarrier` | 0 / 40 | 0 |
+| i7-12700K (1 node) | `bare` | same node | `interlocked` | 0 / 40 | 0 |
+| i7-12700K (1 node) | `bare` | same node | `asymmetric` | 0 / 40 | 0 |
+| i7-12700K (1 node) | `resume-and-refresh` | same node | `baseline` | **3 / 40** | **17** |
+| i7-12700K (1 node) | `resume-and-refresh` | same node | `fullbarrier` | 0 / 40 | 0 |
+| Xeon 8272CL (**2 nodes**) | `bare` | **pairs straddle nodes** | `baseline` | **3 / 30** | **6** |
+| Xeon 8272CL (**2 nodes**) | `bare` | single node | `baseline` | **1 / 30** | **4** |
+| Xeon 8272CL (**2 nodes**) | `bare` | pairs straddle nodes | `fullbarrier` | 0 / 30 | 0 |
+| Xeon 8272CL (**2 nodes**) | `bare` | single node | `fullbarrier` | 0 / 30 | 0 |
 
 For contrast, the **same Xeon with unmap detection** — 8 pairs / 16 threads, both
 NUMA placements, `baseline` and `fullbarrier` alike — produced zero faults in 300 s.
@@ -212,6 +214,9 @@ validated with `--self-test` — see [Appendix A.7](#a7-validating-the-detector)
 dotnet LightEpoch.Repro.dll --impl baseline    --pairs 2 --rounds 100000000000
 dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 2 --rounds 100000000000
 
+# The Tsavorite per-operation sequence (defaults to --pattern bare)
+dotnet LightEpoch.Repro.dll --pattern resume-and-refresh --impl baseline --pairs 2 --rounds 100000000000
+
 # x86-64 - logical detection. "USE-AFTER-FREE" on stderr = bug reproduced.
 dotnet LightEpoch.Repro.dll --impl baseline    --pairs 5 --rounds 8000000 --quarantine
 dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 5 --rounds 8000000 --quarantine
@@ -247,7 +252,7 @@ number of runs.
   - [3.3 Asymmetric barrier (move ordering to the reclaimer)](#33-asymmetric-barrier-move-ordering-to-the-reclaimer)
 - [4. Repository layout](#4-repository-layout)
 - [5. Running it](#5-running-it)
-  - [5.1 The C# repros](#51-the-c-repros)
+  - [5.1 The C# repro](#51-the-c-repro)
   - [5.2 The TLA+ models](#52-the-tla-models)
   - [5.3 The Bf-Tree (Rust) checks](#53-the-bf-tree-rust-checks)
 - [6. How the repros work](#6-how-the-repros-work)
@@ -525,12 +530,11 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   │   ├── AsymmetricBarrier.cs                       # FlushProcessWriteBuffers / membarrier
 │   │   ├── UtilityShim.cs · EpochOps.cs
 │   ├── LightEpoch.Repro.Common/     # shared, self-judging litmus harness
-│   │   ├── ReproRunner.cs                             # CLI, core selection, pairs, and `Litmus` (unmap detection)
+│   │   ├── ReproRunner.cs                             # CLI, the two epoch patterns, core selection, `Litmus` (unmap detection)
 │   │   ├── QuarantineLitmus.cs                        # poison-sentinel detection (x86 path)
 │   │   ├── CoreTopology.cs                            # physical cores, SMT siblings, NUMA nodes
 │   │   ├── WindowsNative.cs                           # VirtualAlloc/VirtualFree, thread pinning
-│   ├── LightEpoch.Repro.Bare/       # Resume -> access -> Suspend
-│   └── LightEpoch.Repro.ResumeAndRefresh/  # Resume -> Refresh -> access -> Suspend
+│   └── LightEpoch.Repro/            # the executable (--pattern bare|resume-and-refresh)
 ├── tla/
 │   ├── memory-models/               # the memory models themselves
 │   │   ├── X86TSO.tla · ARM64.tla
@@ -555,29 +559,30 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 
 ## 5. Running it
 
-### 5.1 The C# repros
+### 5.1 The C# repro
 
-Both repros use the same **self-judging** harness: it never decides to free anything. It hands each
+The repro uses a **self-judging** harness: it never decides to free anything. It hands each
 retired page to the real `BumpCurrentEpoch(onDrain)` API and the epoch
 implementation itself decides — via `ComputeNewSafeToReclaimEpoch` + `Drain` —
 when to invoke `onDrain` (which unmaps the page, or poisons it under
 `--quarantine`). A violation therefore means the epoch freed an object while a
 protected reader that had seen it linked was still reading it.
 
-They differ only in the epoch sequence immediately before the shared access:
+`--pattern` selects the epoch sequence the reader runs immediately before the
+shared access; everything else is identical:
 
-| Project | Reader sequence per operation | Purpose |
+| `--pattern` | Reader sequence per operation | Purpose |
 |---|---|---|
-| `LightEpoch.Repro.Bare` | `Resume()` → access → `Suspend()` | Minimal reproduction of the Acquire announce bug |
-| `LightEpoch.Repro.ResumeAndRefresh` | `Resume()` → `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()` | Epoch portion of a normal Tsavorite `BasicContext` operation |
+| `bare` (default) | `Resume()` → access → `Suspend()` | Minimal reproduction of the Acquire announce bug |
+| `resume-and-refresh` | `Resume()` → `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()` | Epoch portion of a normal Tsavorite `BasicContext` operation |
 
 Run on Windows with a .NET 10 SDK:
 
 ```bash
-DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Bare -c Release -- \
+DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro -c Release -- \
   --impl baseline --rounds 200000000
-DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.ResumeAndRefresh -c Release -- \
-  --impl baseline --rounds 200000000
+DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro -c Release -- \
+  --pattern resume-and-refresh --impl baseline --rounds 200000000
 ```
 
 Exit code `0` = survived (no reclaim while a protected reader held the page);
@@ -593,7 +598,8 @@ than a hardware fault. See §8 for the Tsavorite call sequence.
 
 | Flag | Meaning |
 |---|---|
-| `--pairs N` | Run N concurrent litmus pairs on 2N distinct physical cores. Defaults to 2 when ≥4 physical cores are available — a single pair can run for minutes on Neoverse-N1 without faulting, while two pairs fault in seconds. |
+| `--pattern bare\|resume-and-refresh` | Epoch sequence the reader runs per operation (table above). Defaults to `bare`. |
+| `--pairs N` | Run N concurrent litmus pairs on 2N distinct physical cores. Defaults to 2 when ≥4 physical cores are available — a single pair can run for minutes on Neoverse-N1 without faulting, while two pairs fault in seconds. More is not better: 3 pairs de-aligns the per-round barrier and takes longer to fault, or does not fault at all. |
 | `--seed N` | Shuffle which physical cores are used, to vary core-pair placement between runs. |
 | `--cross-numa` | Force each pair's reader and reclaimer onto **different NUMA nodes**. |
 | `--reader-core N --reclaimer-core N` | Manual pinning; only valid with `--pairs 1`. Warns if the two logical processors are SMT siblings. |
@@ -941,20 +947,20 @@ it best.
 The default `BasicContext` sequence is exercised by both the executable repro
 and the formal model:
 
-* **Repros.** `LightEpoch.Repro.ResumeAndRefresh` runs the epoch-critical
+* **Repros.** `--pattern resume-and-refresh` runs the epoch-critical
   `UnsafeResumeThread` (`Resume()` + `InternalRefresh()`/`ProtectAndDrain()`) …
-  `UnsafeSuspendThread` sequence per operation. `LightEpoch.Repro.Bare` omits
+  `UnsafeSuspendThread` sequence per operation. `--pattern bare` omits
   only the refresh to isolate the original Acquire announce. On ARM64 both
   baselines **fault with `System.AccessViolationException` (`0xC0000005`)**; all
   three fixes run indefinitely:
 
-  | Project | baseline | fullbarrier | interlocked | asymmetric |
+  | `--pattern` | baseline | fullbarrier | interlocked | asymmetric |
   |---|---|---|---|---|
-  | `LightEpoch.Repro.Bare` | **access violation** | survives | survives | survives |
-  | `LightEpoch.Repro.ResumeAndRefresh` | **access violation** | survives | survives | survives |
+  | `bare` | **access violation** | survives | survives | survives |
+  | `resume-and-refresh` | **access violation** | survives | survives | survives |
 
   The extra `ProtectAndDrain()` announce does make the window harder to hit:
-  `ResumeAndRefresh` needs 2 pairs to fault where `Bare` faults with 1 on
+  `resume-and-refresh` needs 2 pairs to fault where `bare` faults with 1 on
   Neoverse-N2 (29 s vs 19 s), and 96 s vs 15 s on the 8-core Neoverse-N1. That is
   expected — the second announce re-publishes the same value, so it gives the
   reclaimer's scan a second chance to observe a non-zero slot — but it is only a
