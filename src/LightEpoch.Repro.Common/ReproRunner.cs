@@ -32,8 +32,7 @@ namespace LightEpoch.Repro.Common
         public string EpochSequence => "Resume() -> access -> Suspend()";
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void Enter<TOps>(ref TOps ops) where TOps : struct, IEpochOps
-            => ops.Resume();
+        public void Enter<TOps>(ref TOps ops) where TOps : struct, IEpochOps => ops.Resume();
     }
 
     /// <summary>

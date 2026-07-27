@@ -4,7 +4,6 @@ namespace LightEpoch.Repro.Tsavorite
 {
     internal static class Program
     {
-        static int Main(string[] args)
-            => ReproRunner.Run<TsavoriteBasicContextReproPattern>(args);
+        static int Main(string[] args) => ReproRunner.Run<TsavoriteBasicContextReproPattern>(args);
     }
 }

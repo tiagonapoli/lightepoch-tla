@@ -825,8 +825,7 @@ namespace LightEpoch.Core
         /// Get a ref to the user word at <paramref name="wordIndex"/> for entry <paramref name="entryIndex"/>.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        ref long UserWordRef(int entryIndex, int wordIndex)
-            => ref Unsafe.Add(ref (*(tableAligned + entryIndex)).userWord0, wordIndex);
+        ref long UserWordRef(int entryIndex, int wordIndex) => ref Unsafe.Add(ref (*(tableAligned + entryIndex)).userWord0, wordIndex);
 
         #endregion
 
