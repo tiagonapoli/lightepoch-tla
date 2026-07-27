@@ -315,30 +315,6 @@ namespace LightEpoch.Core
         }
 
         /// <summary>
-        /// Refresh variant for callers that invoke it immediately after <see cref="Resume"/>
-        /// (Tsavorite's per-operation UnsafeResumeThread path). Drives drain/progress but
-        /// performs no announce: Resume()/Acquire already published localCurrentEpoch behind a
-        /// StoreLoad fence and it is still this thread's newest announcement, so re-announcing
-        /// and re-fencing here is redundant. Verified safe by tla/epoch/fixes/FixedLightEpochResumeAndRefreshSingleFence.tla.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void ProtectAndDrainWithoutAnnounce()
-        {
-            ref var entry = ref Metadata.Entries.GetRef(instanceId);
-
-            Debug.Assert(entry > 0, "Trying to refresh unacquired epoch");
-            Debug.Assert((*(tableAligned + entry)).localCurrentEpoch != 0, "ProtectAndDrainWithoutAnnounce requires a prior Resume() announce");
-
-            if (drainCount > 0)
-                Drain((*(tableAligned + entry)).localCurrentEpoch);
-
-            if (waiterCount > 0)
-            {
-                SuspendResume();
-            }
-        }
-
-        /// <summary>
         /// Thread suspends, then resumes, to give waiting threads a fair chance of making progress.
         /// </summary>
         [MethodImpl(MethodImplOptions.NoInlining)]

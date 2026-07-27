@@ -260,7 +260,6 @@ number of runs.
   - [8.3 What this means for the bug and the fix](#83-what-this-means-for-the-bug-and-the-fix)
   - [8.4 Why acquire + release on every operation? (theories)](#84-why-acquire--release-on-every-operation-theories)
   - [8.5 Reproducing and modelling the default API directly](#85-reproducing-and-modelling-the-default-api-directly)
-  - [8.6 Optimization: drop the redundant second announce](#86-optimization-drop-the-redundant-second-announce-protectanddrainwithoutannounce)
 - [Appendix A. Why the unmap-based repro cannot fault on x86 (TLB shootdown)](#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)
   - [A.1 The observation](#a1-the-observation)
   - [A.2 The cause: `VirtualFree` forces a TLB shootdown](#a2-the-cause-virtualfree-forces-a-tlb-shootdown-and-on-x86-that-serializes-the-reader)
@@ -530,8 +529,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpochWithMemoryBarrier`,
 │   │       ├── FixedLightEpochWithMemoryBarrier.tla        # fix 1 -> HOLDS
 │   │       ├── FixedLightEpochWithInterlocked.tla          # fix 2 -> HOLDS
 │   │       ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3 -> HOLDS
-│   │       ├── FixedLightEpochResumeAndRefresh.tla         # per-op API, fixed -> HOLDS
-│   │       └── FixedLightEpochResumeAndRefreshSingleFence.tla # fence Acquire only -> HOLDS
+│   │       └── FixedLightEpochResumeAndRefresh.tla         # per-op API, fixed -> HOLDS
 │   └── run.sh · Dockerfile
 ```
 
@@ -598,7 +596,7 @@ architectures need different ones.
 
 ```bash
 docker build -f tla/Dockerfile -t lightepoch-tla tla
-docker run --rm lightepoch-tla        # checks all 12 specs and prints expected vs. actual
+docker run --rm lightepoch-tla        # checks all 11 specs and prints expected vs. actual
 ```
 
 Expected outcomes. Note the **Models** column: every spec whose name starts with
@@ -618,20 +616,15 @@ both are VIOLATED.
 | `FixedLightEpochWithInterlocked` | — | proposed fix | HOLDS |
 | `FixedLightEpochWithAsymmetricBarrier` | — | proposed fix | HOLDS |
 | `LightEpochResumeAndRefresh` (per-op `Resume`+`Refresh`+`Suspend`) | — | **Tsavorite as shipped** | **VIOLATED** |
-| `FixedLightEpochResumeAndRefresh` (both announce sites fenced) | — | proposed fix, 2 barriers/op | HOLDS |
-| `FixedLightEpochResumeAndRefreshSingleFence` (fence only Acquire; drop 2nd announce) | — | proposed fix, 1 barrier/op | HOLDS |
+| `FixedLightEpochResumeAndRefresh` (both announce sites fenced) | — | proposed fix | HOLDS |
 
-The last three model **Tsavorite's default per-operation API** (§8). The buggy
+The last two model **Tsavorite's default per-operation API** (§8). The buggy
 spec — the one that matches the code Tsavorite ships — issues both announce
-stores (Acquire and ProtectAndDrain) with no fence and is VIOLATED. The other
-two are the two candidate fixes: fencing both sites HOLDS, and fencing **only**
-Acquire while dropping the redundant second announce
-(`ProtectAndDrainWithoutAnnounce`) also HOLDS (§8.6), at half the barrier cost.
+stores (Acquire and ProtectAndDrain) with no fence and is VIOLATED; fencing both
+announce sites HOLDS.
 
 A `HOLDS` on a `Fixed*` spec therefore means "this fix works", **never**
-"Tsavorite is already correct". A negative control confirms the remaining fence
-is load-bearing rather than decorative: removing the Acquire fence too makes
-`FixedLightEpochResumeAndRefreshSingleFence` VIOLATE.
+"Tsavorite is already correct".
 
 ---
 
@@ -947,62 +940,6 @@ and the formal model:
   `Acquire`-announce → `ProtectAndDrain`-announce → operation-load → `Release`
   sequence, model-checked exhaustively: the unfenced spec is **VIOLATED**, and
   fencing both announce sites **HOLDS**.
-
-### 8.6 Optimization: drop the redundant second announce (`ProtectAndDrainWithoutAnnounce`)
-
-> **This section describes a proposed change, layered on top of a fix.** It is
-> *not* a description of Tsavorite's current behavior, and it is *not* an
-> argument that Tsavorite is already safe. `ProtectAndDrainWithoutAnnounce()`
-> does not exist in Tsavorite — it is a new method this proposal adds, and it
-> only makes sense once `Acquire` is fenced. Read it as "the cheapest correct
-> fix (one barrier per operation)", not as "no fix needed". Tsavorite as shipped
-> is still `LightEpochResumeAndRefresh`, which is **VIOLATED**.
-
-Because `UnsafeResumeThread` runs `Resume()` (Acquire) and `InternalRefresh()`
-(`ProtectAndDrain()`) **back-to-back**, the two announce stores are almost
-always redundant with each other: Acquire publishes `localCurrentEpoch =
-CurrentEpoch`, and — with no epoch bump in between — `ProtectAndDrain` writes the
-same value again. On the *original* code that redundant plain store is nearly
-free. On a **fixed** implementation the fix puts a `StoreLoad` fence after each
-announce, so the per-operation path unnecessarily pays for two fences.
-
-The second fence is unnecessary. The only state that causes the use-after-free
-is `localCurrentEpoch == 0` ("reader absent" → the reclaimer scans past it). That
-state is created **only** by the `0 → E` transition in `Acquire`; the
-`ProtectAndDrain` announce is a monotonic `E → E'` advance that never re-opens
-the absent window, and a delayed `E → E'` store merely leaves the reclaimer
-seeing the older `E ≤ E'` — *more* conservative, never less. So fencing
-**Acquire alone** is sufficient, and the immediately-following refresh can skip
-the announce entirely and only drive drain/progress:
-
-```csharp
-// FixedLightEpochWithMemoryBarrier.cs
-public void ProtectAndDrainWithoutAnnounce()
-{
-    ref var entry = ref Metadata.Entries.GetRef(instanceId);
-    // Resume()/Acquire already published localCurrentEpoch behind a StoreLoad
-    // fence; it is still this thread's newest announce, so no store/fence here.
-    if (drainCount > 0)
-        Drain((*(tableAligned + entry)).localCurrentEpoch);
-
-    if (waiterCount > 0)
-        SuspendResume();
-}
-```
-
-A hot path that resumes-then-refreshes (Tsavorite's `UnsafeResumeThread`) would
-call `Resume()` (fenced announce) + `ProtectAndDrainWithoutAnnounce()` (no fence),
-eliminating one of the two per-operation fences with no change to the reclaimer.
-
-**Proved, not asserted.** `tla/epoch/fixes/FixedLightEpochResumeAndRefreshSingleFence.tla` models
-exactly this — Acquire announces + fences, the refresh performs no announce — and
-`NoUseAfterFree` **HOLDS** exhaustively. A negative control (removing the Acquire
-fence as well) makes the same spec **VIOLATE**, confirming the single Acquire
-fence is precisely what closes the window and the dropped second announce/fence
-was pure overhead. This applies only when the refresh immediately follows a
-`Resume()`; a standalone `ProtectAndDrain()` on an already-protected thread (the
-amortized `UnsafeContext` idiom) still needs its own fence, because there is no
-preceding fenced Acquire in that path.
 
 ---
 
