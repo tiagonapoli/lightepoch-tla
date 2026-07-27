@@ -1221,7 +1221,9 @@ The same three options as [§3](#3-the-fixes), with the same conclusion —
 
 The GenMC run above verifies the first exhaustively under RC11.
 
+---
 
+## Appendix A. Why the unmap-based repro cannot fault on x86 (TLB shootdown)
 
 ### A.1 The observation
 
