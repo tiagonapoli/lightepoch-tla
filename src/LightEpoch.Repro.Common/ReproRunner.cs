@@ -6,6 +6,7 @@
 // LightEpoch unmaps a page while the protected reader is dereferencing it.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -61,8 +62,13 @@ namespace LightEpoch.Repro.Common
             string impl = "baseline";
             long rounds = 200_000_000;
             int deref = 20_000;
-            int readerCore = 1;
-            int reclaimerCore = 0;
+            int readerCore = -1;
+            int reclaimerCore = -1;
+            int pairs = -1;
+            int? seed = null;
+            bool crossNuma = false;
+            bool quarantine = false;
+            bool selfTest = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -90,6 +96,25 @@ namespace LightEpoch.Repro.Common
                         if (!TryReadInt(args, ref i, out reclaimerCore))
                             return InvalidValue(arg);
                         break;
+                    case "--pairs":
+                        if (!TryReadInt(args, ref i, out pairs))
+                            return InvalidValue(arg);
+                        break;
+                    case "--seed":
+                        if (!TryReadInt(args, ref i, out int seedValue))
+                            return InvalidValue(arg);
+                        seed = seedValue;
+                        break;
+                    case "--cross-numa":
+                        crossNuma = true;
+                        break;
+                    case "--quarantine":
+                        quarantine = true;
+                        break;
+                    case "--self-test":
+                        quarantine = true;
+                        selfTest = true;
+                        break;
                     case "-h":
                     case "--help":
                         Usage<TPattern>();
@@ -101,19 +126,156 @@ namespace LightEpoch.Repro.Common
                 }
             }
 
-            if (rounds <= 0 || deref < 0 || readerCore < 0 || reclaimerCore < 0)
+            if (rounds <= 0 || deref < 0)
             {
-                Console.Error.WriteLine("rounds must be positive; deref and core IDs must be non-negative");
+                Console.Error.WriteLine("rounds must be positive and deref must be non-negative");
+                return 2;
+            }
+
+            var physicalCores = CoreTopology.Enumerate();
+
+            // Two concurrent pairs reproduce the race far more reliably than one:
+            // a single pair can run for minutes on Neoverse-N1 without faulting.
+            if (pairs < 0)
+                pairs = physicalCores.Count >= 4 ? 2 : 1;
+
+            if (pairs < 1)
+            {
+                Console.Error.WriteLine("--pairs must be >= 1");
                 return 2;
             }
 
             var pattern = new TPattern();
-            Console.WriteLine($"{pattern.Name} repro  impl={impl}  rounds={rounds:N0}  deref={deref}");
+            Console.WriteLine($"{pattern.Name} repro  impl={impl}  rounds={rounds:N0}  deref={deref}  pairs={pairs}");
             Console.WriteLine($"epoch sequence: {pattern.EpochSequence}");
             Console.WriteLine(
                 $"OS={RuntimeInformation.OSDescription.Trim()}  " +
                 $"Arch={RuntimeInformation.ProcessArchitecture}  " +
-                $"cores(reclaimer={reclaimerCore},reader={readerCore})");
+                $"{CoreTopology.Describe()}");
+            Console.WriteLine(quarantine
+                ? "detection: quarantine (page pool + poison sentinel; no syscall in the race loop)"
+                : "detection: unmap (VirtualFree MEM_RELEASE; a fault is a hardware access violation)");
+
+            if (readerCore >= 0 || reclaimerCore >= 0)
+            {
+                if (readerCore < 0 || reclaimerCore < 0)
+                {
+                    Console.Error.WriteLine("--reader-core and --reclaimer-core must be given together");
+                    return 2;
+                }
+
+                if (pairs != 1)
+                {
+                    Console.Error.WriteLine("--reader-core/--reclaimer-core apply only with --pairs 1");
+                    return 2;
+                }
+
+                WarnIfSamePhysicalCore(physicalCores, reclaimerCore, readerCore);
+                Console.WriteLine($"pair 0: cores(reclaimer={reclaimerCore},reader={readerCore})");
+                return RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest);
+            }
+
+            int[] selected;
+            try
+            {
+                selected = crossNuma
+                    ? CoreTopology.SelectCrossNumaPairs(pairs, seed)
+                    : CoreTopology.SelectDistinctPhysicalCores(2 * pairs, seed);
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return 2;
+            }
+
+            Console.WriteLine(
+                $"core selection: one logical processor per physical core" +
+                (crossNuma ? ", pairs straddle NUMA nodes" : string.Empty) +
+                (seed.HasValue ? $" (shuffled, seed={seed.Value})" : " (in enumeration order)"));
+
+            return RunPairs<TPattern>(impl, rounds, deref, pairs, selected, quarantine, selfTest);
+        }
+
+        static void WarnIfSamePhysicalCore(
+            IReadOnlyList<CoreTopology.PhysicalCore> physicalCores, int reclaimerCore, int readerCore)
+        {
+            foreach (var core in physicalCores)
+            {
+                if (Array.IndexOf(core.LogicalProcessors, reclaimerCore) >= 0 &&
+                    Array.IndexOf(core.LogicalProcessors, readerCore) >= 0)
+                {
+                    Console.Error.WriteLine(
+                        $"WARNING: logical processors {reclaimerCore} and {readerCore} are SMT siblings of one " +
+                        "physical core. They share a store buffer, so the Store-Buffer window this repro " +
+                        "depends on cannot open and a non-fault proves nothing.");
+                    return;
+                }
+            }
+        }
+
+        // Runs several independent Store-Buffer litmus pairs concurrently, one
+        // reader+reclaimer per pair, each thread on its own physical core. In unmap
+        // mode a real fault is an access violation that terminates the whole process;
+        // in quarantine mode each pair returns its own verdict, so they are combined.
+        static int RunPairs<TPattern>(string impl, long rounds, int deref, int pairs, int[] cores, bool quarantine, bool selfTest)
+            where TPattern : struct, IReproPattern
+        {
+            var numaByLogicalProcessor = new Dictionary<int, int>();
+            foreach (var core in CoreTopology.Enumerate())
+            {
+                foreach (int lp in core.LogicalProcessors)
+                    numaByLogicalProcessor[lp] = core.NumaNode;
+            }
+
+            var threads = new Thread[pairs];
+            var exitCodes = new int[pairs];
+            for (int p = 0; p < pairs; p++)
+            {
+                int pairIndex = p;
+                int reclaimerCore = cores[2 * p];
+                int readerCore = cores[(2 * p) + 1];
+                numaByLogicalProcessor.TryGetValue(reclaimerCore, out int reclaimerNode);
+                numaByLogicalProcessor.TryGetValue(readerCore, out int readerNode);
+                Console.WriteLine(
+                    $"pair {p}: cores(reclaimer={reclaimerCore}[numa{reclaimerNode}]," +
+                    $"reader={readerCore}[numa{readerNode}])");
+                var t = new Thread(() => exitCodes[pairIndex] =
+                    RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest))
+                {
+                    IsBackground = false,
+                    Name = $"pair{p}"
+                };
+                threads[p] = t;
+                t.Start();
+            }
+
+            foreach (var t in threads)
+                t.Join();
+
+            foreach (int code in exitCodes)
+            {
+                if (code != 0)
+                    return code;
+            }
+
+            return 0;
+        }
+
+        static int RunSingle<TPattern>(
+            string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest)
+            where TPattern : struct, IReproPattern
+        {
+            if (quarantine)
+            {
+                return impl switch
+                {
+                    "baseline" => new QuarantineLitmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
+                    "fullbarrier" => new QuarantineLitmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
+                    "interlocked" => new QuarantineLitmus<InterlockedExchangeOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
+                    "asymmetric" => new QuarantineLitmus<AsymmetricOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
+                    _ => UnknownImplementation(impl),
+                };
+            }
 
             return impl switch
             {
@@ -173,8 +335,16 @@ namespace LightEpoch.Repro.Common
             var pattern = new TPattern();
             Console.WriteLine(
                 $"usage: {pattern.Name} --impl <baseline|fullbarrier|interlocked|asymmetric> " +
-                "[--rounds N] [--deref N] [--reader-core N] [--reclaimer-core N]\n" +
+                "[--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa] [--quarantine]\n" +
+                "       [--reader-core N --reclaimer-core N]   (single pair, manual pinning)\n" +
                 $"epoch sequence: {pattern.EpochSequence}\n" +
+                "Each pair runs a reader and a reclaimer, one per physical core (SMT siblings are\n" +
+                "never paired: they share a store buffer and the race window cannot open).\n" +
+                "--pairs defaults to 2 when at least 4 physical cores are available.\n" +
+                "--quarantine selects the x86 detection mode: a pooled page + poison sentinel\n" +
+                "  instead of VirtualFree, so no TLB-shootdown IPI serializes the reader. The\n" +
+                "  default unmap mode is the right one on ARM64, where the fault is a genuine\n" +
+                "  access violation and no IPI is involved.\n" +
                 "exit 0 = survived; nonzero/aborted = fault observed.");
         }
     }
