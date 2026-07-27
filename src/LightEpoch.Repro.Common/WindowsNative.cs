@@ -22,6 +22,14 @@ namespace LightEpoch.Repro.Common
                 throw new PlatformNotSupportedException("The repro is supported only on Windows.");
         }
 
+        /// <summary>
+        /// Allocates a standalone reservation, committed and readable/writable so the
+        /// reader can dereference it. <see cref="Free"/> unmaps it with MEM_RELEASE,
+        /// which requires the base address of a whole VirtualAlloc reservation — so
+        /// each page must come from its own call rather than be carved out of a larger
+        /// block. That unmapping is what makes the epoch's use-after-free observable as
+        /// a hardware access violation.
+        /// </summary>
         public static byte* Alloc(nuint bytes)
         {
             var pointer = VirtualAlloc(IntPtr.Zero, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_RW);
