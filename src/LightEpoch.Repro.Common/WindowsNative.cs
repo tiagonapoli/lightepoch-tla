@@ -39,9 +39,13 @@ namespace LightEpoch.Repro.Common
         }
 
         /// <summary>Fully unmap the region; any subsequent access to it faults.</summary>
-        public static void Free(byte* p, nuint bytes)
+        public static void Free(byte* p)
         {
-            _ = bytes;
+            // MEM_RELEASE requires dwSize to be 0 and releases the whole reservation, so
+            // the range leaves the process's page tables and a later access raises
+            // STATUS_ACCESS_VIOLATION (0xC0000005) — this is the ARM64 detector. If a
+            // later VirtualAlloc happens to reuse the range the access silently succeeds
+            // instead, which can only hide a violation, never manufacture one.
             if (!VirtualFree((IntPtr)p, 0, MEM_RELEASE))
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "VirtualFree failed.");
         }

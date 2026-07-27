@@ -121,7 +121,7 @@ namespace LightEpoch.Repro.Common
 
                 curPage = 0;
                 long pageAddress = (long)page;
-                ops.BumpCurrentEpoch(() => WindowsNative.Free((byte*)pageAddress, PageSize));
+                ops.BumpCurrentEpoch(() => WindowsNative.Free((byte*)pageAddress));
 
                 EndBarrier();
             }
