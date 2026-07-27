@@ -21,7 +21,7 @@ namespace LightEpoch.Core
     internal static class AsymmetricBarrier
     {
         [DllImport("kernel32")]
-        static extern void FlushProcessWriteBuffers();
+        private static extern void FlushProcessWriteBuffers();
 
         /// <summary>
         /// Force every other core in this process to become visible to the caller

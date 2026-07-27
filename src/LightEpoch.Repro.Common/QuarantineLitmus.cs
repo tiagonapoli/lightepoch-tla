@@ -28,37 +28,37 @@ namespace LightEpoch.Repro.Common
         where TOps : struct, IEpochOps
         where TPattern : struct, IReproPattern
     {
-        const nuint PageSize = 4096;
-        const int PoolPages = 1024;
-        const long Poison = unchecked((long)0xDEAD_BEEF_DEAD_BEEFUL);
+        private const nuint PageSize = 4096;
+        private const int PoolPages = 1024;
+        private const long Poison = unchecked((long)0xDEAD_BEEF_DEAD_BEEFUL);
 
-        TOps ops;
-        TPattern pattern;
-        byte* pool;
-        long curPage;
-        int startCount;
-        int startSense;
-        int endCount;
-        int endSense;
-        long sink;
-        long violations;
-        long observedPages;
-        long drains;
-        long quarantines;
-        long firstViolationRound;
-        volatile bool stop;
+        private TOps ops;
+        private TPattern pattern;
+        private byte* pool;
+        private long curPage;
+        private int startCount;
+        private int startSense;
+        private int endCount;
+        private int endSense;
+        private long sink;
+        private long violations;
+        private long observedPages;
+        private long drains;
+        private long quarantines;
+        private long firstViolationRound;
+        private volatile bool stop;
 
         // One cached delegate per pool slot. BumpCurrentEpoch defers the drain callback
         // until the epoch decides the retired epoch is safe, which can be several rounds
         // later, so the callback must be bound to the page that was actually retired.
         // Building them once keeps that binding without allocating inside the race loop.
-        readonly Action[] drainCallbacks;
+        private readonly Action[] drainCallbacks;
 
-        readonly long rounds;
-        readonly int deref;
-        readonly int readerCore;
-        readonly int reclaimerCore;
-        readonly bool selfTest;
+        private readonly long rounds;
+        private readonly int deref;
+        private readonly int readerCore;
+        private readonly int reclaimerCore;
+        private readonly bool selfTest;
 
         public QuarantineLitmus(long rounds, int deref, int readerCore, int reclaimerCore, bool selfTest = false)
         {
@@ -121,7 +121,7 @@ namespace LightEpoch.Repro.Common
             return 0;
         }
 
-        void ReaderLoop()
+        private void ReaderLoop()
         {
             WindowsNative.Pin(readerCore);
 
@@ -138,7 +138,7 @@ namespace LightEpoch.Repro.Common
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void ReadAndCheck(long round)
+        private void ReadAndCheck(long round)
         {
             long pageAddress = curPage;
             if (pageAddress == 0)
@@ -165,7 +165,7 @@ namespace LightEpoch.Repro.Common
             }
         }
 
-        void ReclaimerLoop()
+        private void ReclaimerLoop()
         {
             for (long round = 0; round < rounds; round++)
             {
@@ -194,7 +194,7 @@ namespace LightEpoch.Repro.Common
 
         // Stands in for the unmap: the epoch has decided this page is safe to recycle, so
         // stamping it destroys any value a still-protected reader could legitimately see.
-        void Quarantine(long page)
+        private void Quarantine(long page)
         {
             quarantines++;
             long* words = (long*)page;
@@ -203,7 +203,7 @@ namespace LightEpoch.Repro.Common
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void StartBarrier()
+        private void StartBarrier()
         {
             int sense = Volatile.Read(ref startSense);
             if (Interlocked.Increment(ref startCount) == 2)
@@ -219,7 +219,7 @@ namespace LightEpoch.Repro.Common
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void EndBarrier()
+        private void EndBarrier()
         {
             int sense = Volatile.Read(ref endSense);
             if (Interlocked.Increment(ref endCount) == 2)

@@ -13,11 +13,11 @@ namespace LightEpoch.Repro.Common
     /// </summary>
     internal static class CoreTopology
     {
-        const int RelationProcessorCore = 0;
-        const int RelationNumaNode = 1;
+        private const int RelationProcessorCore = 0;
+        private const int RelationNumaNode = 1;
 
         [DllImport("kernel32", SetLastError = true)]
-        static extern bool GetLogicalProcessorInformationEx(int relationshipType, IntPtr buffer, ref uint returnedLength);
+        private static extern bool GetLogicalProcessorInformationEx(int relationshipType, IntPtr buffer, ref uint returnedLength);
 
         internal readonly struct PhysicalCore
         {
@@ -101,7 +101,7 @@ namespace LightEpoch.Repro.Common
             return cores;
         }
 
-        static Dictionary<int, int> NumaNodesByLogicalProcessor()
+        private static Dictionary<int, int> NumaNodesByLogicalProcessor()
         {
             var map = new Dictionary<int, int>();
             uint length = 0;

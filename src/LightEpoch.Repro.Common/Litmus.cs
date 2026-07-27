@@ -26,22 +26,22 @@ namespace LightEpoch.Repro.Common
         where TOps : struct, IEpochOps
         where TPattern : struct, IReproPattern
     {
-        const nuint PageSize = 4096;
+        private const nuint PageSize = 4096;
 
-        TOps ops;
-        TPattern pattern;
-        long curPage;
-        int startCount;
-        int startSense;
-        int endCount;
-        int endSense;
-        long sink;
-        volatile bool stop;
+        private TOps ops;
+        private TPattern pattern;
+        private long curPage;
+        private int startCount;
+        private int startSense;
+        private int endCount;
+        private int endSense;
+        private long sink;
+        private volatile bool stop;
 
-        readonly long rounds;
-        readonly int deref;
-        readonly int readerCore;
-        readonly int reclaimerCore;
+        private readonly long rounds;
+        private readonly int deref;
+        private readonly int readerCore;
+        private readonly int reclaimerCore;
 
         public Litmus(long rounds, int deref, int readerCore, int reclaimerCore)
         {
@@ -78,7 +78,7 @@ namespace LightEpoch.Repro.Common
             return 0;
         }
 
-        void ReaderLoop()
+        private void ReaderLoop()
         {
             WindowsNative.Pin(readerCore);
 
@@ -95,7 +95,7 @@ namespace LightEpoch.Repro.Common
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void ReadAndDeref()
+        private void ReadAndDeref()
         {
             long pageAddress = curPage;
             if (pageAddress == 0)
@@ -108,7 +108,7 @@ namespace LightEpoch.Repro.Common
             sink += accumulator;
         }
 
-        void ReclaimerLoop()
+        private void ReclaimerLoop()
         {
             for (long round = 0; round < rounds; round++)
             {
@@ -128,7 +128,7 @@ namespace LightEpoch.Repro.Common
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void StartBarrier()
+        private void StartBarrier()
         {
             int sense = Volatile.Read(ref startSense);
             if (Interlocked.Increment(ref startCount) == 2)
@@ -144,7 +144,7 @@ namespace LightEpoch.Repro.Common
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void EndBarrier()
+        private void EndBarrier()
         {
             int sense = Volatile.Read(ref endSense);
             if (Interlocked.Increment(ref endCount) == 2)

@@ -11,16 +11,16 @@ namespace LightEpoch.Core
     /// </summary>
     public interface IEpochOps
     {
-        void Resume();
-        void Refresh();
-        void Suspend();
-        void BumpCurrentEpoch(Action onDrain);
-        string Name { get; }
+        public void Resume();
+        public void Refresh();
+        public void Suspend();
+        public void BumpCurrentEpoch(Action onDrain);
+        public string Name { get; }
     }
 
     public readonly struct BaselineOps : IEpochOps
     {
-        readonly LightEpoch e;
+        private readonly LightEpoch e;
         public BaselineOps() { e = new LightEpoch(); }
         public void Resume() => e.Resume();
         public void Refresh() => e.ProtectAndDrain();
@@ -31,7 +31,7 @@ namespace LightEpoch.Core
 
     public readonly struct FullBarrierOps : IEpochOps
     {
-        readonly FixedLightEpochWithMemoryBarrier e;
+        private readonly FixedLightEpochWithMemoryBarrier e;
         public FullBarrierOps() { e = new FixedLightEpochWithMemoryBarrier(); }
         public void Resume() => e.Resume();
         public void Refresh() => e.ProtectAndDrain();
@@ -42,7 +42,7 @@ namespace LightEpoch.Core
 
     public readonly struct InterlockedExchangeOps : IEpochOps
     {
-        readonly FixedLightEpochWithInterlockedExchange e;
+        private readonly FixedLightEpochWithInterlockedExchange e;
         public InterlockedExchangeOps() { e = new FixedLightEpochWithInterlockedExchange(); }
         public void Resume() => e.Resume();
         public void Refresh() => e.ProtectAndDrain();
@@ -53,7 +53,7 @@ namespace LightEpoch.Core
 
     public readonly struct AsymmetricOps : IEpochOps
     {
-        readonly FixedLightEpochAsymmetricBarrier e;
+        private readonly FixedLightEpochAsymmetricBarrier e;
         public AsymmetricOps() { e = new FixedLightEpochAsymmetricBarrier(); }
         public void Resume() => e.Resume();
         public void Refresh() => e.ProtectAndDrain();

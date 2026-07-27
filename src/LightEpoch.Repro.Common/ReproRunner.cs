@@ -19,10 +19,10 @@ namespace LightEpoch.Repro.Common
 {
     public interface IReproPattern
     {
-        string Name { get; }
-        string EpochSequence { get; }
+        public string Name { get; }
+        public string EpochSequence { get; }
 
-        void Enter<TOps>(ref TOps ops) where TOps : struct, IEpochOps;
+        public void Enter<TOps>(ref TOps ops) where TOps : struct, IEpochOps;
     }
 
     /// <summary>
@@ -84,7 +84,7 @@ namespace LightEpoch.Repro.Common
             };
         }
 
-        static int Run<TPattern>(string[] args)
+        private static int Run<TPattern>(string[] args)
             where TPattern : struct, IReproPattern
         {
             string impl = "baseline";
@@ -224,7 +224,7 @@ namespace LightEpoch.Repro.Common
             return RunPairs<TPattern>(impl, rounds, deref, pairs, selected, quarantine, selfTest);
         }
 
-        static void WarnIfSamePhysicalCore(
+        private static void WarnIfSamePhysicalCore(
             IReadOnlyList<CoreTopology.PhysicalCore> physicalCores, int reclaimerCore, int readerCore)
         {
             foreach (var core in physicalCores)
@@ -245,7 +245,7 @@ namespace LightEpoch.Repro.Common
         // reader+reclaimer per pair, each thread on its own physical core. In unmap
         // mode a real fault is an access violation that terminates the whole process;
         // in quarantine mode each pair returns its own verdict, so they are combined.
-        static int RunPairs<TPattern>(string impl, long rounds, int deref, int pairs, int[] cores, bool quarantine, bool selfTest)
+        private static int RunPairs<TPattern>(string impl, long rounds, int deref, int pairs, int[] cores, bool quarantine, bool selfTest)
             where TPattern : struct, IReproPattern
         {
             var numaByLogicalProcessor = new Dictionary<int, int>();
@@ -289,7 +289,7 @@ namespace LightEpoch.Repro.Common
             return 0;
         }
 
-        static int RunSingle<TPattern>(
+        private static int RunSingle<TPattern>(
             string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest)
             where TPattern : struct, IReproPattern
         {
@@ -315,7 +315,7 @@ namespace LightEpoch.Repro.Common
             };
         }
 
-        static bool TryRead(string[] args, ref int index, out string value)
+        private static bool TryRead(string[] args, ref int index, out string value)
         {
             if (index + 1 >= args.Length)
             {
@@ -327,45 +327,45 @@ namespace LightEpoch.Repro.Common
             return true;
         }
 
-        static bool TryReadLong(string[] args, ref int index, out long value)
+        private static bool TryReadLong(string[] args, ref int index, out long value)
         {
             value = 0;
             return TryRead(args, ref index, out string text) && long.TryParse(text, out value);
         }
 
-        static bool TryReadInt(string[] args, ref int index, out int value)
+        private static bool TryReadInt(string[] args, ref int index, out int value)
         {
             value = 0;
             return TryRead(args, ref index, out string text) && int.TryParse(text, out value);
         }
 
-        static int MissingValue(string arg)
+        private static int MissingValue(string arg)
         {
             Console.Error.WriteLine($"missing value for '{arg}'");
             return 2;
         }
 
-        static int InvalidValue(string arg)
+        private static int InvalidValue(string arg)
         {
             Console.Error.WriteLine($"invalid or missing numeric value for '{arg}'");
             return 2;
         }
 
-        static int UnknownImplementation(string impl)
+        private static int UnknownImplementation(string impl)
         {
             Console.Error.WriteLine(
                 $"unknown --impl '{impl}' (want: baseline|fullbarrier|interlocked|asymmetric)");
             return 2;
         }
 
-        static int UnknownPattern(string pattern)
+        private static int UnknownPattern(string pattern)
         {
             Console.Error.WriteLine(
                 $"unknown --pattern '{pattern}' (want: bare|resume-and-refresh)");
             return 2;
         }
 
-        static void Usage<TPattern>() where TPattern : struct, IReproPattern
+        private static void Usage<TPattern>() where TPattern : struct, IReproPattern
         {
             var pattern = new TPattern();
             Console.WriteLine(

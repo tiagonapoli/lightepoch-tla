@@ -4,6 +4,6 @@ namespace LightEpoch.Repro
 {
     internal static class Program
     {
-        static int Main(string[] args) => ReproRunner.Run(args);
+        private static int Main(string[] args) => ReproRunner.Run(args);
     }
 }

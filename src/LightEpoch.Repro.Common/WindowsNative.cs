@@ -10,11 +10,11 @@ namespace LightEpoch.Repro.Common
     /// </summary>
     internal static unsafe class WindowsNative
     {
-        const uint MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000, MEM_RELEASE = 0x8000, PAGE_RW = 0x04;
-        [DllImport("kernel32", SetLastError = true)] static extern IntPtr VirtualAlloc(IntPtr a, nuint s, uint t, uint p);
-        [DllImport("kernel32", SetLastError = true)] static extern bool VirtualFree(IntPtr a, nuint s, uint t);
-        [DllImport("kernel32")] static extern IntPtr GetCurrentThread();
-        [DllImport("kernel32", SetLastError = true)] static extern UIntPtr SetThreadAffinityMask(IntPtr h, UIntPtr m);
+        private const uint MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000, MEM_RELEASE = 0x8000, PAGE_RW = 0x04;
+        [DllImport("kernel32", SetLastError = true)] private static extern IntPtr VirtualAlloc(IntPtr a, nuint s, uint t, uint p);
+        [DllImport("kernel32", SetLastError = true)] private static extern bool VirtualFree(IntPtr a, nuint s, uint t);
+        [DllImport("kernel32")] private static extern IntPtr GetCurrentThread();
+        [DllImport("kernel32", SetLastError = true)] private static extern UIntPtr SetThreadAffinityMask(IntPtr h, UIntPtr m);
 
         static WindowsNative()
         {
