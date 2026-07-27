@@ -1,6 +1,7 @@
------------------------------- MODULE FixedLightEpoch ------------------------------
+------------------------ MODULE FixedLightEpochWithMemoryBarrier ------------------------
 (***************************************************************************)
-(* FixedLightEpoch — the validated FIX: a full StoreLoad barrier            *)
+(* FixedLightEpochWithMemoryBarrier — the validated FIX: a full StoreLoad   *)
+(* barrier.                                                                *)
 (*                                                                         *)
 (* Models the epoch ENTER path against a per-core store buffer (the x86-TSO *)
 (* shape; the same StoreLoad window exists, and is far easier to observe,   *)

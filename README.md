@@ -495,7 +495,7 @@ inter-processor interrupt. This is the technique used by RCU and by
 managed-runtime garbage collectors. See
 `src/LightEpoch.Implementations/AsymmetricBarrier.cs`.
 
-All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
+All three fixes are proven safe in `tla/` (`FixedLightEpochWithMemoryBarrier`,
 `FixedLightEpochWithInterlocked`, `FixedLightEpochWithAsymmetricBarrier` all →
 `NoUseAfterFree` HOLDS).
 
@@ -524,7 +524,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   ├── memory-models/               # the memory models themselves
 │   │   ├── X86TSO.tla · ARM64.tla
 │   ├── LightEpoch.tla                              # buggy   -> VIOLATED
-│   ├── FixedLightEpoch.tla                         # fix 1   -> HOLDS
+│   ├── FixedLightEpochWithMemoryBarrier.tla        # fix 1   -> HOLDS
 │   ├── FixedLightEpochWithInterlocked.tla          # fix 2   -> HOLDS
 │   ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3   -> HOLDS
 │   ├── LightEpochResumeAndRefresh.tla                     # Tsavorite per-op API, buggy -> VIOLATED
@@ -608,7 +608,7 @@ Expected outcomes:
 | `ARM64` | release | VIOLATED |
 | `ARM64` | full | HOLDS |
 | `LightEpoch` | — | VIOLATED |
-| `FixedLightEpoch` | — | HOLDS |
+| `FixedLightEpochWithMemoryBarrier` | — | HOLDS |
 | `FixedLightEpochWithInterlocked` | — | HOLDS |
 | `FixedLightEpochWithAsymmetricBarrier` | — | HOLDS |
 | `LightEpochResumeAndRefresh` (per-op `Resume`+`Refresh`+`Suspend`) | — | VIOLATED |

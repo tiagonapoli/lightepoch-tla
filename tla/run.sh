@@ -52,7 +52,7 @@ run "$HERE/memory-models" ARM64  ARM64_Full.cfg      HOLDS    "DMB ISH / seq-cst
 echo ""
 echo "================= LightEpoch reclamation specs ================="
 run "$HERE" LightEpoch                            LightEpoch.cfg                            VIOLATED "missing announce fence"
-run "$HERE" FixedLightEpoch                       FixedLightEpoch.cfg                       HOLDS    "full StoreLoad barrier"
+run "$HERE" FixedLightEpochWithMemoryBarrier      FixedLightEpochWithMemoryBarrier.cfg      HOLDS    "full StoreLoad barrier"
 run "$HERE" FixedLightEpochWithInterlocked        FixedLightEpochWithInterlocked.cfg        HOLDS    "atomic RMW announce"
 run "$HERE" FixedLightEpochWithAsymmetricBarrier  FixedLightEpochWithAsymmetricBarrier.cfg  HOLDS    "reclaimer-side barrier"
 
