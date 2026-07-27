@@ -34,12 +34,12 @@ The bug is demonstrated in two complementary ways:
 - [3. The fixes](#3-the-fixes)
   - [3.1 Full barrier (the straightforward fix)](#31-full-barrier-the-straightforward-fix)
   - [3.2 Interlocked exchange (fold store + fence into one op)](#32-interlocked-exchange-fold-store--fence-into-one-op)
-  - [3.3 Asymmetric barrier (best for read-heavy workloads)](#33-asymmetric-barrier-best-for-read-heavy-workloads)
+  - [3.3 Asymmetric barrier (move ordering to the reclaimer)](#33-asymmetric-barrier-move-ordering-to-the-reclaimer)
 - [4. Repository layout](#4-repository-layout)
 - [5. Running it](#5-running-it)
   - [5.1 The C# repro](#51-the-c-repro)
   - [5.2 The TLA+ models](#52-the-tla-models)
-- [6. How the repro works](#6-how-the-repro-works)
+- [6. How the repros work](#6-how-the-repros-work)
   - [6.1 The two threads](#61-the-two-threads)
   - [6.2 Why a fault is a *real* use-after-free, not a segfault trick](#62-why-a-fault-is-a-real-use-after-free-not-a-segfault-trick)
   - [6.3 Why the epoch — not the harness — does the freeing](#63-why-the-epoch--not-the-harness--does-the-freeing)
@@ -291,8 +291,9 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   │   ├── FixedLightEpochAsymmetricBarrier.cs        # reclaimer-side barrier
 │   │   ├── AsymmetricBarrier.cs                       # FlushProcessWriteBuffers / membarrier
 │   │   ├── IEpochAccessor.cs · UtilityShim.cs · EpochOps.cs
-│   └── LightEpoch.Repro/            # the litmus workload (self-judging)
-│       ├── Program.cs · Plat.cs     # --pattern bare|tsavorite|refresh
+│   ├── LightEpoch.Repro.Common/     # shared, self-judging litmus harness
+│   ├── LightEpoch.Repro.Bare/       # Resume -> access -> Suspend
+│   └── LightEpoch.Repro.Garnet/     # Garnet BasicContext epoch sequence
 └── tla/
     ├── memory-models/               # the memory models themselves
     │   ├── X86TSO.tla · ARM64.tla
@@ -309,64 +310,54 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 
 ## 5. Running it
 
-### 5.1 The C# repro
+### 5.1 The C# repros
 
-The harness is **self-judging**: it never decides to free anything. It hands each
+Both repros use the same **self-judging** harness: it never decides to free anything. It hands each
 retired page to the real `BumpCurrentEpoch(onDrain)` API and the epoch
 implementation itself decides — via `ComputeNewSafeToReclaimEpoch` + `Drain` —
 when to invoke `onDrain` (which unmaps the page). A fault therefore means the
 epoch freed an object while a protected reader that had seen it linked was still
 reading it.
 
+They differ only in the epoch sequence immediately before the shared access:
+
+| Project | Reader sequence per operation | Purpose |
+|---|---|---|
+| `LightEpoch.Repro.Bare` | `Resume()` → access → `Suspend()` | Minimal reproduction of the Acquire announce bug |
+| `LightEpoch.Repro.Garnet` | `Resume()` → `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()` | Epoch portion of Garnet's normal Tsavorite `BasicContext` operation |
+
 ```bash
-# On real ARM64 hardware:
-docker build -f Dockerfile.arm64 -t lightepoch-repro:arm64 .
+# Build both repros on real ARM64 hardware (.NET 10):
+docker build -f Dockerfile.arm64 --build-arg REPRO=LightEpoch.Repro.Bare \
+  -t lightepoch-repro:bare-arm64 .
+docker build -f Dockerfile.arm64 --build-arg REPRO=LightEpoch.Repro.Garnet \
+  -t lightepoch-repro:garnet-arm64 .
 
-docker run --rm lightepoch-repro:arm64 --impl baseline    --rounds 200000000   # faults in seconds (exit 134)
-docker run --rm lightepoch-repro:arm64 --impl fullbarrier --rounds 200000000   # runs to completion (exit 0)
-docker run --rm lightepoch-repro:arm64 --impl interlocked --rounds 200000000   # exit 0
-docker run --rm lightepoch-repro:arm64 --impl asymmetric  --rounds 200000000   # exit 0
+docker run --rm lightepoch-repro:bare-arm64   --impl baseline --rounds 200000000
+docker run --rm lightepoch-repro:garnet-arm64 --impl baseline --rounds 200000000
 
-# x86-64 control — even the baseline completes (exit 0):
-docker build -f Dockerfile.x86 -t lightepoch-repro:x86 .
-docker run --rm lightepoch-repro:x86 --impl baseline --rounds 200000000
+# Run any fix by replacing baseline with fullbarrier, interlocked, or asymmetric.
+
+# x86-64 control — both baseline repros complete:
+docker build -f Dockerfile.x86 --build-arg REPRO=LightEpoch.Repro.Bare \
+  -t lightepoch-repro:bare-x86 .
+docker build -f Dockerfile.x86 --build-arg REPRO=LightEpoch.Repro.Garnet \
+  -t lightepoch-repro:garnet-x86 .
 ```
 
-Or without Docker (from `src/LightEpoch.Repro`):
+Or without Docker using a .NET 10 SDK:
 
 ```bash
-DOTNET_gcServer=1 dotnet run -c Release -- --impl baseline --rounds 200000000
+DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Bare -c Release -- \
+  --impl baseline --rounds 200000000
+DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Garnet -c Release -- \
+  --impl baseline --rounds 200000000
 ```
 
 Exit code `0` = survived (no reclaim while a protected reader held the page);
-a non-zero / aborted exit (`134`) = a fault was observed.
-
-**Modelling how Tsavorite actually calls the epoch (`--pattern`).** By default the
-reader does a bare `Resume()` … read … `Suspend()` per round. The `--pattern`
-flag reshapes the reader's per-operation call sequence to match real Tsavorite
-usage (see §8):
-
-| `--pattern` | Reader does, per round | Models | ARM64 baseline |
-|---|---|---|---|
-| `bare` (default) | `Resume()`; read; `Suspend()` | a single bare announce (the Acquire site) | **faults** |
-| `tsavorite` | `Resume()`; `Refresh()`; read; `Suspend()` | `BasicContext`'s `UnsafeResumeThread`(`Resume`+`InternalRefresh`) … `UnsafeSuspendThread` — the **exact default API** | **faults** |
-| `refresh` | `Resume()` once; `{ Refresh(); read }` loop; `Suspend()` once | the amortized `UnsafeContext` idiom | survives* |
-
-```bash
-docker run --rm lightepoch-repro:arm64 --impl baseline --pattern tsavorite --rounds 200000000   # faults (exit 134)
-docker run --rm lightepoch-repro:arm64 --impl baseline --pattern refresh   --rounds 200000000   # survives* (see note)
-```
-
-\* The `refresh` pattern did **not** fault in a 200 s ARM64 run. This is not a
-general safety guarantee — it is a property of *this harness's access pattern*:
-after the one-time `Resume()`, the announce only ever advances **monotonically**
-(`localCurrentEpoch` never resets to `0`), and this harness always dereferences
-an object retired at the *same* epoch it is currently announcing, so a stale
-(buffered) announce only makes the reclaimer **more** conservative. The per-op
-`tsavorite`/`bare` patterns, by contrast, reset the slot to `0` on every
-`Suspend()` and so **re-open the "absent reader" (`lce == 0`) window on every
-single operation** — which is exactly why the shipped default API reproduces the
-fault so readily. See §8.3.
+a non-zero or aborted exit (`134`) = a fault was observed. On genuine ARM64,
+both baseline repros fault; the fixed implementations survive. See §8 for the
+upstream Garnet call-path evidence.
 
 ### 5.2 The TLA+ models
 
@@ -401,10 +392,10 @@ Acquire fence too makes `FixedLightEpochTsavoriteNoAnnounce` VIOLATE.
 
 ---
 
-## 6. How the repro works
+## 6. How the repros work
 
-The repro (`src/LightEpoch.Repro`) is deliberately the *smallest* program that
-turns the abstract Store-Buffer race into a real, hard memory fault — and it is
+The shared harness (`src/LightEpoch.Repro.Common`) is deliberately the smallest
+program that turns the abstract Store-Buffer race into a real, hard memory fault — and it is
 **self-judging**: the harness never decides to free anything. It only wires the
 two real epoch operations into an SB shape and lets the epoch implementation
 itself pull the trigger. If the process faults, the epoch algorithm freed a live
@@ -416,7 +407,7 @@ Two threads are pinned to two distinct physical cores (`Plat.Pin`, via
 `SetThreadAffinityMask` / `sched_setaffinity`) so their store buffers are
 genuinely separate hardware:
 
-* **Reader** (`ReaderLoop`) — the *protected* accessor:
+* **Reader** (`ReaderLoop`) — the *protected* accessor. The bare repro executes:
   ```
   ops.Resume();        // STORE announce:  localCurrentEpoch = CurrentEpoch   (the unfenced store under test)
   long p = curPage;    // LOAD  the object pointer
@@ -424,6 +415,10 @@ genuinely separate hardware:
       read pg[0..deref] // <-- faults here if the page was unmapped
   ops.Suspend();
   ```
+  The Garnet repro inserts `ops.Refresh()` between `Resume()` and the pointer
+  load, matching `UnsafeResumeThread`'s `Resume()` + `InternalRefresh()` epoch
+  sequence. `InternalRefresh()` begins with `ProtectAndDrain()`, which performs
+  the second announce represented by `ops.Refresh()`.
 * **Reclaimer** (`ReclaimerLoop`) — links, unlinks, and retires a page each round:
   ```
   page = Plat.Alloc(4096);          // a real OS page (VirtualAlloc / mmap)
@@ -515,6 +510,27 @@ clean run is whether the announce store carries a StoreLoad fence.
 
 The safety impact depends on **how often Tsavorite enters the epoch** and which
 announce path it uses, so it is worth being precise about the call pattern.
+
+This was verified against Garnet `main` commit
+[`b6f14b9967089951e1065a61e7175cb28f1cf34f`](https://github.com/microsoft/garnet/tree/b6f14b9967089951e1065a61e7175cb28f1cf34f):
+
+* [`BasicGarnetApi`](https://github.com/microsoft/garnet/blob/b6f14b9967089951e1065a61e7175cb28f1cf34f/libs/GlobalUsings.cs)
+  is backed by Tsavorite `BasicContext` instances.
+* [`BasicContext`](https://github.com/microsoft/garnet/blob/b6f14b9967089951e1065a61e7175cb28f1cf34f/libs/storage/Tsavorite/cs/src/core/ClientSession/BasicContext.cs)
+  brackets each normal read/upsert/RMW/delete with
+  `UnsafeResumeThread()`/`UnsafeSuspendThread()`.
+* [`UnsafeResumeThread`](https://github.com/microsoft/garnet/blob/b6f14b9967089951e1065a61e7175cb28f1cf34f/libs/storage/Tsavorite/cs/src/core/ClientSession/ClientSession.cs)
+  calls `epoch.Resume()` and then `store.InternalRefresh(...)`.
+* [`InternalRefresh`](https://github.com/microsoft/garnet/blob/b6f14b9967089951e1065a61e7175cb28f1cf34f/libs/storage/Tsavorite/cs/src/core/Index/Tsavorite/TsavoriteThread.cs)
+  begins with `epoch.ProtectAndDrain()`.
+
+Normal GET/SET/RMW/DELETE operations therefore acquire and release the storage
+epoch per operation; Garnet does not hold that epoch across the RESP command
+loop. Specialized pointer-stability operations such as BITOP are an exception:
+they use `TransactionalUnsafeContext.BeginUnsafe()`/`EndUnsafe()` to hold the
+epoch across multiple reads, releasing it around pending I/O. Garnet's separate
+cluster-state epoch around request processing is not this Tsavorite storage
+epoch.
 
 `LightEpoch` exposes two very different ways to protect work:
 
@@ -611,24 +627,17 @@ operation":
   independent reason the missing StoreLoad fence is invisible on x86 in
   Tsavorite specifically — not just "store buffers drain fast," but "a locked RMW
   runs on the same hot path, every op."
-* **The per-operation pattern is what makes the bug reproduce so readily on
-  ARM64 — not the amortized one.** `Suspend()`/`Release()` resets the slot to
+* **The per-operation pattern reopens the vulnerable window on every command.**
+  `Suspend()`/`Release()` resets the slot to
   `kInvalidIndex` and `localCurrentEpoch` to `0` at the end of *every* operation,
   and the next `Resume()`/`Acquire()` re-announces `0 → CurrentEpoch`. That
   `0 → E` transition is the dangerous one: while it is buffered, the reclaimer's
   scan reads `lce == 0` and treats the reader as **absent**, computing a safe
   epoch straight past a live reader. The default `BasicContext` API therefore
   **re-opens the "absent reader" window on every single operation** — which is
-  exactly why both the `bare` and `tsavorite` repro patterns fault within seconds
-  on ARM64 (§8.5). By contrast, the `ProtectAndDrain()` announce on the amortized
-  path is a *monotonic advance* (`E → E'`, never back to `0`); a buffered such
-  announce only ever makes the reclaimer **more** conservative, so — for the
-  same-epoch access this repro performs — the `refresh` pattern did **not** fault
-  in a 200 s run. The naked `ProtectAndDrain()` store is still not *correctly*
-  ordered in the abstract (a thread that advances its epoch and then dereferences
-  an object safe only under the *older* epoch would still need the fence, which
-  is why `FixedLightEpoch` fences that site too), but the recurring, easily-hit
-  hazard lives on the **per-operation acquire path the default API uses**.
+  why both dedicated baseline repros fault within seconds on ARM64 (§8.5). The
+  additional `ProtectAndDrain()` announce in the Garnet sequence is another
+  plain store; it does not provide the missing StoreLoad ordering.
 
 ### 8.4 Why acquire + release on every operation? (theories)
 
@@ -674,21 +683,18 @@ it best.
 The default `BasicContext` sequence is exercised by both the executable repro
 and the formal model:
 
-* **Repro (`--pattern tsavorite`).** The reader runs the exact
-  `UnsafeResumeThread`(`Resume()`+`Refresh()`) … `UnsafeSuspendThread` sequence
-  per operation. On ARM64 Neoverse-N2 the baseline **faults with
+* **Repros.** `LightEpoch.Repro.Garnet` runs the epoch-critical
+  `UnsafeResumeThread` (`Resume()` + `InternalRefresh()`/`ProtectAndDrain()`) …
+  `UnsafeSuspendThread` sequence per operation. `LightEpoch.Repro.Bare` omits
+  only the refresh to isolate the original Acquire announce. On ARM64
+  Neoverse-N2 both baselines **fault with
   `System.AccessViolationException` (exit 134)**; all three fixes run
-  indefinitely. Measured matrix (200 s cap; `134` = use-after-free, `124` =
-  survived to timeout):
+  indefinitely:
 
-  | `--pattern` | baseline | fullbarrier | interlocked | asymmetric |
+  | Project | baseline | fullbarrier | interlocked | asymmetric |
   |---|---|---|---|---|
-  | `bare` | **134 (fault)** | 124 | 124 | 124 |
-  | `tsavorite` | **134 (fault)** | 124 | 124 | 124 |
-  | `refresh` | 124 (survived\*) | — | — | — |
-
-  \* See §8.3: `refresh` announces monotonically and this harness accesses a
-  same-epoch object, so a buffered announce is only ever more conservative.
+  | `LightEpoch.Repro.Bare` | **134 (fault)** | survives | survives | survives |
+  | `LightEpoch.Repro.Garnet` | **134 (fault)** | survives | survives | survives |
 
 * **TLA+ (`LightEpochTsavorite` / `FixedLightEpochTsavorite`).** The per-op
   `Acquire`-announce → `ProtectAndDrain`-announce → operation-load → `Release`

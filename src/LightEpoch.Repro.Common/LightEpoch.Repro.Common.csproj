@@ -7,12 +7,15 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <Optimize>true</Optimize>
-    <RootNamespace>Tsavorite.core</RootNamespace>
-    <AssemblyName>LightEpoch.Implementations</AssemblyName>
-    <!-- The reclaim-race semantics require server GC (background-free) so a
-         collection never masks the plain announce store's visibility window. -->
+    <AssemblyName>LightEpoch.Repro.Common</AssemblyName>
+    <RootNamespace>LightEpoch.Repro.Common</RootNamespace>
     <ServerGarbageCollection>true</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <TieredCompilation>false</TieredCompilation>
   </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LightEpoch.Implementations\LightEpoch.Implementations.csproj" />
+  </ItemGroup>
 
 </Project>

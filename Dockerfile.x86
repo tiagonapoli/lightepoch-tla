@@ -8,17 +8,20 @@
 # demonstrating the defect is a memory-model bug, not a plain logic bug.
 #
 # Build:
-#   docker build -f Dockerfile.x86 -t lightepoch-repro:x86 .
+#   docker build -f Dockerfile.x86 --build-arg REPRO=LightEpoch.Repro.Bare \
+#     -t lightepoch-repro:bare-x86 .
+#   docker build -f Dockerfile.x86 --build-arg REPRO=LightEpoch.Repro.Garnet \
+#     -t lightepoch-repro:garnet-x86 .
 # Run (all impls complete with exit 0 here):
-#   docker run --rm lightepoch-repro:x86 --impl baseline --rounds 200000000
+#   docker run --rm lightepoch-repro:garnet-x86 --impl baseline --rounds 200000000
 
-FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
-COPY src/LightEpoch.Implementations/ LightEpoch.Implementations/
-COPY src/LightEpoch.Repro/ LightEpoch.Repro/
-RUN dotnet publish LightEpoch.Repro/LightEpoch.Repro.csproj -c Release -o /app
+ARG REPRO=LightEpoch.Repro.Bare
+COPY src/ ./
+RUN dotnet publish "$REPRO/$REPRO.csproj" -c Release -o /app
 
-FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/runtime:8.0
+FROM --platform=linux/amd64 mcr.microsoft.com/dotnet/runtime:10.0
 WORKDIR /app
 COPY --from=build /app .
 ENV DOTNET_gcServer=1

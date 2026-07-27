@@ -3,8 +3,8 @@ using System;
 namespace Tsavorite.core
 {
     /// <summary>
-    /// Uniform surface over the epoch implementations for the litmus harness and
-    /// the benchmarks. Implemented by <c>struct</c>s so a generic caller
+    /// Uniform surface over the epoch implementations for the repro harnesses.
+    /// Implemented by <c>struct</c>s so a generic caller
     /// constrained to <c>struct, IEpochOps</c> is JIT-specialized and fully
     /// devirtualized — the emitted code is identical to calling the concrete
     /// epoch class directly, so the harness does not perturb the race it studies.

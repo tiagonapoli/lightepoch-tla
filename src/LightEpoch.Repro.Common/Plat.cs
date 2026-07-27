@@ -1,7 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace LightEpoch.Repro
+namespace LightEpoch.Repro.Common
 {
     /// <summary>
     /// Cross-platform primitives the litmus needs: whole-page allocation that can

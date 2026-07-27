@@ -6,21 +6,24 @@
 # StoreLoad window does not open, so the baseline will NOT fault there.
 #
 # Build (on an arm64 host):
-#   docker build -f Dockerfile.arm64 -t lightepoch-repro:arm64 .
+#   docker build -f Dockerfile.arm64 --build-arg REPRO=LightEpoch.Repro.Bare \
+#     -t lightepoch-repro:bare-arm64 .
+#   docker build -f Dockerfile.arm64 --build-arg REPRO=LightEpoch.Repro.Garnet \
+#     -t lightepoch-repro:garnet-arm64 .
 # Run the buggy baseline (faults within seconds, exit != 0):
-#   docker run --rm lightepoch-repro:arm64 --impl baseline --rounds 200000000
+#   docker run --rm lightepoch-repro:garnet-arm64 --impl baseline --rounds 200000000
 # Run a fix (survives indefinitely, exit 0):
-#   docker run --rm lightepoch-repro:arm64 --impl fullbarrier --rounds 200000000
-#   docker run --rm lightepoch-repro:arm64 --impl interlocked --rounds 200000000
-#   docker run --rm lightepoch-repro:arm64 --impl asymmetric  --rounds 200000000
+#   docker run --rm lightepoch-repro:garnet-arm64 --impl fullbarrier --rounds 200000000
+#   docker run --rm lightepoch-repro:garnet-arm64 --impl interlocked --rounds 200000000
+#   docker run --rm lightepoch-repro:garnet-arm64 --impl asymmetric  --rounds 200000000
 
-FROM --platform=linux/arm64 mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM --platform=linux/arm64 mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
-COPY src/LightEpoch.Implementations/ LightEpoch.Implementations/
-COPY src/LightEpoch.Repro/ LightEpoch.Repro/
-RUN dotnet publish LightEpoch.Repro/LightEpoch.Repro.csproj -c Release -o /app
+ARG REPRO=LightEpoch.Repro.Bare
+COPY src/ ./
+RUN dotnet publish "$REPRO/$REPRO.csproj" -c Release -o /app
 
-FROM --platform=linux/arm64 mcr.microsoft.com/dotnet/runtime:8.0
+FROM --platform=linux/arm64 mcr.microsoft.com/dotnet/runtime:10.0
 WORKDIR /app
 COPY --from=build /app .
 ENV DOTNET_gcServer=1
