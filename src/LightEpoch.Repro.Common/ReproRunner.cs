@@ -1,15 +1,15 @@
-// Shared, self-judging Store-Buffer litmus used by the two repro executables.
+// CLI, core selection and pair orchestration for the LightEpoch repro.
 //
-// The reader first publishes its epoch and then loads a shared page pointer.
-// The reclaimer first unlinks that pointer and then asks the real LightEpoch
-// implementation to retire the page. If both loads miss the other core's store,
-// LightEpoch frees a page while the protected reader is dereferencing it: Litmus
-// makes that observable by unmapping (a hardware access violation, used on ARM64)
-// and QuarantineLitmus by poisoning (a logical check, required on x86-64).
+// Each pair runs a reader and a reclaimer on two distinct physical cores. The
+// reader publishes its epoch and then loads a shared page pointer; the reclaimer
+// unlinks that pointer and then asks the real LightEpoch implementation to retire
+// the page. If both loads miss the other core's store, LightEpoch frees a page
+// while the protected reader is dereferencing it. Litmus makes that observable by
+// unmapping (a hardware access violation, used on ARM64) and QuarantineLitmus by
+// poisoning (a logical check, required on x86-64).
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -390,150 +390,6 @@ namespace LightEpoch.Repro.Common
                 "  can fire. It must report violations; if it does not, no clean --quarantine\n" +
                 "  result means anything.\n" +
                 "exit 0 = survived; nonzero/aborted = fault observed.");
-        }
-    }
-
-    /// <summary>
-    /// Two-sided Store-Buffer litmus over one epoch instance. Both the epoch
-    /// implementation and operation pattern are structs, so the JIT specializes
-    /// and devirtualizes their calls instead of adding synchronization to the
-    /// race window being measured.
-    /// </summary>
-    internal sealed unsafe class Litmus<TOps, TPattern>
-        where TOps : struct, IEpochOps
-        where TPattern : struct, IReproPattern
-    {
-        const nuint PageSize = 4096;
-
-        TOps ops;
-        TPattern pattern;
-        long curPage;
-        int startCount;
-        int startSense;
-        int endCount;
-        int endSense;
-        long sink;
-        volatile bool stop;
-
-        readonly long rounds;
-        readonly int deref;
-        readonly int readerCore;
-        readonly int reclaimerCore;
-
-        public Litmus(long rounds, int deref, int readerCore, int reclaimerCore)
-        {
-            this.rounds = rounds;
-            this.deref = deref;
-            this.readerCore = readerCore;
-            this.reclaimerCore = reclaimerCore;
-            ops = new TOps();
-            pattern = new TPattern();
-        }
-
-        public int Run()
-        {
-            Console.WriteLine($"ops = {ops.Name}");
-
-            var reader = new Thread(ReaderLoop)
-            {
-                IsBackground = true,
-                Name = "reader",
-                Priority = ThreadPriority.Highest
-            };
-            reader.Start();
-            WindowsNative.Pin(reclaimerCore);
-
-            var stopwatch = Stopwatch.StartNew();
-            ReclaimerLoop();
-            stopwatch.Stop();
-
-            stop = true;
-            reader.Join(2000);
-            Console.WriteLine(
-                $"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s " +
-                $"with NO fault. sink={Volatile.Read(ref sink)}");
-            return 0;
-        }
-
-        void ReaderLoop()
-        {
-            WindowsNative.Pin(readerCore);
-
-            for (long round = 0; round < rounds && !stop; round++)
-            {
-                StartBarrier();
-
-                pattern.Enter(ref ops);
-                ReadAndDeref();
-                ops.Suspend();
-
-                EndBarrier();
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void ReadAndDeref()
-        {
-            long pageAddress = curPage;
-            if (pageAddress == 0)
-                return;
-
-            long* page = (long*)pageAddress;
-            long accumulator = 0;
-            for (int index = 0; index < deref; index++)
-                accumulator += page[index & 511];
-            sink += accumulator;
-        }
-
-        void ReclaimerLoop()
-        {
-            for (long round = 0; round < rounds; round++)
-            {
-                byte* page = WindowsNative.Alloc(PageSize);
-                for (int index = 0; index < 512; index++)
-                    ((long*)page)[index] = index;
-                Volatile.Write(ref curPage, (long)page);
-
-                StartBarrier();
-
-                curPage = 0;
-                long pageAddress = (long)page;
-                ops.BumpCurrentEpoch(() => WindowsNative.Free((byte*)pageAddress, PageSize));
-
-                EndBarrier();
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void StartBarrier()
-        {
-            int sense = Volatile.Read(ref startSense);
-            if (Interlocked.Increment(ref startCount) == 2)
-            {
-                startCount = 0;
-                Volatile.Write(ref startSense, sense ^ 1);
-                return;
-            }
-
-            var spinner = new SpinWait();
-            while (Volatile.Read(ref startSense) == sense)
-                spinner.SpinOnce(-1);
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        void EndBarrier()
-        {
-            int sense = Volatile.Read(ref endSense);
-            if (Interlocked.Increment(ref endCount) == 2)
-            {
-                endCount = 0;
-                Volatile.Write(ref endSense, sense ^ 1);
-                return;
-            }
-
-            var spinner = new SpinWait();
-            while (Volatile.Read(ref endSense) == sense)
-                spinner.SpinOnce(-1);
         }
     }
 }

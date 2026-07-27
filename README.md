@@ -515,7 +515,8 @@ All three fixes are proven safe in `tla/` (`FixedLightEpochWithMemoryBarrier`,
 │   │   ├── AsymmetricBarrier.cs                       # FlushProcessWriteBuffers / membarrier
 │   │   ├── UtilityShim.cs · EpochOps.cs
 │   ├── LightEpoch.Repro.Common/     # shared, self-judging litmus harness
-│   │   ├── ReproRunner.cs                             # CLI, the two epoch patterns, core selection, `Litmus` (unmap detection)
+│   │   ├── ReproRunner.cs                             # CLI, the two epoch patterns, core selection, pair orchestration
+│   │   ├── Litmus.cs                                  # unmap detection (ARM64 path)
 │   │   ├── QuarantineLitmus.cs                        # poison-sentinel detection (x86 path)
 │   │   ├── CoreTopology.cs                            # physical cores, SMT siblings, NUMA nodes
 │   │   ├── WindowsNative.cs                           # VirtualAlloc/VirtualFree, thread pinning
