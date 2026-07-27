@@ -3,7 +3,9 @@
 // The reader first publishes its epoch and then loads a shared page pointer.
 // The reclaimer first unlinks that pointer and then asks the real LightEpoch
 // implementation to retire the page. If both loads miss the other core's store,
-// LightEpoch unmaps a page while the protected reader is dereferencing it.
+// LightEpoch frees a page while the protected reader is dereferencing it: Litmus
+// makes that observable by unmapping (a hardware access violation, used on ARM64)
+// and QuarantineLitmus by poisoning (a logical check, required on x86-64).
 
 using System;
 using System.Collections.Generic;
@@ -335,7 +337,8 @@ namespace LightEpoch.Repro.Common
             var pattern = new TPattern();
             Console.WriteLine(
                 $"usage: {pattern.Name} --impl <baseline|fullbarrier|interlocked|asymmetric> " +
-                "[--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa] [--quarantine]\n" +
+                "[--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa]\n" +
+                "       [--quarantine] [--self-test]\n" +
                 "       [--reader-core N --reclaimer-core N]   (single pair, manual pinning)\n" +
                 $"epoch sequence: {pattern.EpochSequence}\n" +
                 "Each pair runs a reader and a reclaimer, one per physical core (SMT siblings are\n" +
@@ -345,6 +348,9 @@ namespace LightEpoch.Repro.Common
                 "  instead of VirtualFree, so no TLB-shootdown IPI serializes the reader. The\n" +
                 "  default unmap mode is the right one on ARM64, where the fault is a genuine\n" +
                 "  access violation and no IPI is involved.\n" +
+                "--self-test implies --quarantine and poisons every round, proving the detector\n" +
+                "  can fire. It must report violations; if it does not, no clean --quarantine\n" +
+                "  result means anything.\n" +
                 "exit 0 = survived; nonzero/aborted = fault observed.");
         }
     }

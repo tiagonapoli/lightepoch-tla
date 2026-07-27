@@ -12,10 +12,11 @@ The bug is demonstrated in two complementary ways:
 
 1. **A running C# repro** (`src/`) that links the epoch implementation
    unmodified and lets the epoch machinery *itself* free the object. On real
-   Windows ARM64 the buggy build faults within seconds, every run; the fixed builds run
-   indefinitely. On x86-64 the buggy build **also** reproduces — the window is far
-   narrower, and observing it requires a detection mode that does not serialize the
-   reader (see [Results](#results-reproduced-on-arm64-and-x86-64) below).
+   Windows ARM64 the buggy build faults within seconds — reliably, though the
+   concurrency needed to open the window varies by microarchitecture — while the
+   fixed builds run indefinitely. On x86-64 the buggy build **also** reproduces — the
+   window is far narrower, and observing it requires a detection mode that does not
+   serialize the reader (see [Results](#results-reproduced-on-arm64-and-x86-64) below).
 2. **Formal TLA+ models** (`tla/`) of the x86-TSO and ARM64 memory models, and
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
    use-after-free in the baseline and proves each fix closes it.
@@ -31,7 +32,9 @@ The bug is demonstrated in two complementary ways:
 Every number below is from real hardware (Azure VMs and a local workstation),
 running the **unmodified** epoch implementation, with the epoch's own
 `BumpCurrentEpoch` → `ComputeNewSafeToReclaimEpoch` → drain logic deciding when to
-free. The harness never frees anything on its own.
+free. The harness never frees anything on its own. All runs in this section use
+`LightEpoch.Repro.Bare` (`Resume()` → access → `Suspend()`); the
+`ResumeAndRefresh` variant is covered in [§8.5](#85-reproducing-and-modelling-the-default-api-directly).
 
 ### Hardware under test
 
@@ -91,9 +94,9 @@ With `--quarantine`, counts are use-after-free **reads** observed:
 | Xeon 8272CL (**2 nodes**) | pairs straddle nodes | `fullbarrier` | 0 / 30 | 0 |
 | Xeon 8272CL (**2 nodes**) | single node | `fullbarrier` | 0 / 30 | 0 |
 
-For contrast, the **same Xeon, same thread counts, unmap detection**: zero faults in
-300 s for cross-NUMA, same-NUMA and fixed alike — the measurement, not the hardware,
-was hiding the bug.
+For contrast, the **same Xeon with unmap detection** — 8 pairs / 16 threads, both
+NUMA placements, `baseline` and `fullbarrier` alike — produced zero faults in 300 s.
+The measurement, not the hardware, was hiding the bug.
 
 Cross-NUMA is at most a mild amplifier (3/30 vs 1/30 pairs), not the
 order-of-magnitude effect one might expect from inter-socket latency.
@@ -102,10 +105,11 @@ order-of-magnitude effect one might expect from inter-socket latency.
 
 * The unfenced announce is **unsound on both architectures**, matching the TLA+
   result (`X86TSO` and `ARM64` with no fence both **VIOLATED**).
-* **Every fix was clean everywhere**: `fullbarrier`, `interlocked` and `asymmetric`
-  produced zero faults and zero violations across every CPU, thread count and NUMA
-  placement tested — while the buggy build failed on both architectures under the
-  same conditions.
+* **Every fix was clean under the conditions that broke the baseline.**
+  `fullbarrier` was run on every machine and every configuration in the tables above
+  and never faulted or violated; `interlocked` and `asymmetric` were additionally
+  clean across all x86-64 quarantine runs. The buggy build failed on both
+  architectures under exactly the same conditions.
 * The difference between the architectures is **frequency, not legality**: seconds
   to a hard fault on ARM64, versus tens of events across tens of pair-runs on x86-64.
 
@@ -228,7 +232,7 @@ number of runs.
   - [3.3 Asymmetric barrier (move ordering to the reclaimer)](#33-asymmetric-barrier-move-ordering-to-the-reclaimer)
 - [4. Repository layout](#4-repository-layout)
 - [5. Running it](#5-running-it)
-  - [5.1 The C# repro](#51-the-c-repro)
+  - [5.1 The C# repros](#51-the-c-repros)
   - [5.2 The TLA+ models](#52-the-tla-models)
 - [6. How the repros work](#6-how-the-repros-work)
   - [6.1 The two threads](#61-the-two-threads)
@@ -497,6 +501,10 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   │   ├── AsymmetricBarrier.cs                       # FlushProcessWriteBuffers / membarrier
 │   │   ├── UtilityShim.cs · EpochOps.cs
 │   ├── LightEpoch.Repro.Common/     # shared, self-judging litmus harness
+│   │   ├── ReproRunner.cs                             # CLI, core selection, pairs, and `Litmus` (unmap detection)
+│   │   ├── QuarantineLitmus.cs                        # poison-sentinel detection (x86 path)
+│   │   ├── CoreTopology.cs                            # physical cores, SMT siblings, NUMA nodes
+│   │   ├── WindowsNative.cs                           # VirtualAlloc/VirtualFree, thread pinning
 │   ├── LightEpoch.Repro.Bare/       # Resume -> access -> Suspend
 │   └── LightEpoch.Repro.ResumeAndRefresh/  # Resume -> Refresh -> access -> Suspend
 └── tla/
@@ -520,9 +528,9 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 Both repros use the same **self-judging** harness: it never decides to free anything. It hands each
 retired page to the real `BumpCurrentEpoch(onDrain)` API and the epoch
 implementation itself decides — via `ComputeNewSafeToReclaimEpoch` + `Drain` —
-when to invoke `onDrain` (which unmaps the page). A fault therefore means the
-epoch freed an object while a protected reader that had seen it linked was still
-reading it.
+when to invoke `onDrain` (which unmaps the page, or poisons it under
+`--quarantine`). A violation therefore means the epoch freed an object while a
+protected reader that had seen it linked was still reading it.
 
 They differ only in the epoch sequence immediately before the shared access:
 
@@ -543,8 +551,11 @@ DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.ResumeAndRefresh -c 
 Exit code `0` = survived (no reclaim while a protected reader held the page);
 an access-violation termination (`0xC0000005`) = a fault was observed. On
 Windows ARM64,
-both baseline repros fault; the fixed implementations survive. See §8 for the
-Tsavorite call sequence.
+both baseline repros fault; the fixed implementations survive. **On x86-64 add
+`--quarantine`** — the default unmap mode cannot observe the window there, for
+reasons explained in [Appendix A](#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown).
+In that mode the verdict is `USE-AFTER-FREE` on stderr and a nonzero exit rather
+than a hardware fault. See §8 for the Tsavorite call sequence.
 
 **Core selection and concurrency flags:**
 
@@ -601,17 +612,23 @@ Acquire fence too makes `FixedLightEpochResumeAndRefreshNoAnnounce` VIOLATE.
 ## 6. How the repros work
 
 The shared harness (`src/LightEpoch.Repro.Common`) is deliberately the smallest
-program that turns the abstract Store-Buffer race into a real, hard memory fault — and it is
+program that turns the abstract Store-Buffer race into an observable use-after-free — and it is
 **self-judging**: the harness never decides to free anything. It only wires the
 two real epoch operations into an SB shape and lets the epoch implementation
 itself pull the trigger. If the process faults, the epoch algorithm freed a live
 object; if it exits `0`, it didn't. There is no oracle to argue with.
 
+This section describes the default **unmap** mode, which is the one used on ARM64.
+`--quarantine` keeps everything below identical except how the free is made
+observable — see [Methodology](#methodology) and
+[Appendix A](#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown).
+
 ### 6.1 The two threads
 
-Two threads are pinned to two distinct physical cores (`WindowsNative.Pin`, via
-`SetThreadAffinityMask`) so their store buffers are
-genuinely separate hardware:
+Each litmus pair is a reader and a reclaimer pinned to two distinct **physical**
+cores (`WindowsNative.Pin`, via `SetThreadAffinityMask`) so their store buffers are
+genuinely separate hardware. `--pairs N` runs N such pairs concurrently on 2N
+physical cores; SMT siblings are never paired, since siblings share a store buffer:
 
 * **Reader** (`ReaderLoop`) — the *protected* accessor. The bare repro executes:
   ```
@@ -670,8 +687,8 @@ missing.
 
 Two design choices ensure the harness measures the epoch, not itself:
 
-* **Devirtualized dispatch.** `Litmus<TOps>` is generic over a `struct, IEpochOps`
-  adapter (`BaselineOps`, `FullBarrierOps`, …). The JIT specializes the generic
+* **Devirtualized dispatch.** `Litmus<TOps, TPattern>` is generic over a
+  `struct, IEpochOps` adapter (`BaselineOps`, `FullBarrierOps`, …). The JIT specializes the generic
   per struct and inlines `Resume`/`Suspend`/`BumpCurrentEpoch` down to the
   concrete epoch calls, so there is no virtual-call barrier or indirection
   sitting between the announce store and the object load.
@@ -685,8 +702,9 @@ Two design choices ensure the harness measures the epoch, not itself:
 
 * **Reader faults mid-dereference** → the epoch freed a page a protected reader
   was reading → the process terminates with access violation `0xC0000005`. This
-  is the bug, and on Windows ARM64 the `baseline` build hits it within seconds,
-  every run.
+  is the bug, and on Windows ARM64 the `baseline` build hits it within seconds
+  once enough pairs are running (one pair suffices on Neoverse-N2; Neoverse-N1
+  needs two).
 * **Loop completes all rounds** → prints `Completed N rounds ... with NO fault`
   and returns `0`. This is what all three fixes do — indefinitely — and what
   even the `baseline` does on x86-64 in this mode. On x86 that last part is a
@@ -696,8 +714,8 @@ Two design choices ensure the harness measures the epoch, not itself:
   See [Appendix A](#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown).
 
 Selecting the implementation is just `--impl baseline|fullbarrier|interlocked|asymmetric`;
-everything else (page size, dereference count, the two core ids) is identical
-across variants, so the *only* thing that changes between a faulting run and a
+everything else (page size, dereference count, core selection, detection mode) is
+identical across variants, so the *only* thing that changes between a faulting run and a
 clean run is whether the announce store carries a StoreLoad fence.
 
 ---
@@ -1043,24 +1061,27 @@ So the correct claim is narrower than "x86 is safe":
 > observe it there, because the unmap itself serializes the reader. x86 is quiet in
 > these runs as an artifact of the measurement, not as a property of the hardware.
 
-Sections 2.1 and 6.5 should be read with that caveat.
+Sections 2.1 and 6.5 carry this caveat inline.
 
 ### A.5 Observing it on x86: the fenceless detection mode
 
 To test x86 honestly the *detection* mechanism has to change while the race stays
 identical — no kernel involvement in the hot loop:
 
-1. **Replace unmapping with quarantine.** Pre-allocate a pool of pages up front and
-   reuse them. "Freeing" writes a poison sentinel and bumps a per-page generation
-   counter instead of calling `VirtualFree`. No page-table edit, therefore no
-   shootdown, therefore no IPI and no serialized reader.
-2. **Detect the violation logically.** The reclaimer publishes the epoch it decided
-   was safe; the reader checks, after its critical section, whether that safe epoch
-   advanced past the epoch it had announced while it was still inside. A reader that
-   observes poison in a page it was protecting is a use-after-free by the
-   algorithm's own definition — established purely through memory, with no fault.
-3. **Remove the per-round allocation.** Cache the drain `Action` (or use a struct
-   callback) so no GC — and therefore no `FlushProcessWriteBuffers` — occurs.
+1. **Replace unmapping with quarantine.** Pre-allocate a pool of pages up front
+   (1024) and recycle them. "Freeing" writes a poison sentinel
+   (`0xDEADBEEFDEADBEEF`) over the page instead of calling `VirtualFree`. No
+   page-table edit, therefore no shootdown, therefore no IPI and no serialized
+   reader.
+2. **Detect the violation logically.** The reader checks every value it reads
+   inside its critical section. Observing poison in a page it was protecting is a
+   use-after-free by the algorithm's own definition — established purely through
+   memory, with no fault.
+3. **Remove the per-round allocation** so no GC — and therefore no
+   `FlushProcessWriteBuffers` — occurs. Note that simply caching *one* `Action` is
+   wrong: `BumpCurrentEpoch` defers the drain, so the callback must stay bound to
+   the page that was actually retired. The implementation pre-builds one delegate
+   per pool slot (see [A.7](#a7-validating-the-detector)).
 
 The trade-off is deliberate: the unmap mode gives an unforgeable hardware verdict and
 is the right default for ARM64; the quarantine mode gives a weaker (software) verdict

@@ -18,11 +18,11 @@ namespace LightEpoch.Repro.Common
     /// maintenance in hardware (TLBI ... IS), no core is interrupted, and the unmap mode works.
     ///
     /// This variant keeps the race identical but removes the kernel from the loop: pages come
-    /// from a pool allocated once, "freeing" writes a poison sentinel and bumps a generation
-    /// counter, and the drain callback is cached so no allocation (and therefore no GC
-    /// suspension, which would call FlushProcessWriteBuffers) happens per round. Detection is
-    /// logical rather than by hardware fault: a reader that observes poison in a page it was
-    /// protecting is a use-after-free by the algorithm's own definition.
+    /// from a pool allocated once, "freeing" writes a poison sentinel over the page, and the
+    /// drain callbacks are pre-built so no allocation (and therefore no GC suspension, which
+    /// would call FlushProcessWriteBuffers) happens per round. Detection is logical rather
+    /// than by hardware fault: a reader that observes poison in a page it was protecting is a
+    /// use-after-free by the algorithm's own definition.
     /// </summary>
     internal sealed unsafe class QuarantineLitmus<TOps, TPattern>
         where TOps : struct, IEpochOps
