@@ -11,14 +11,14 @@ The bug is demonstrated in two complementary ways:
 
 1. **A running C# repro** (`src/`) that links the epoch implementation
    unmodified and lets the epoch machinery *itself* free the object. On real
-   ARM64 the buggy build faults within seconds, every run; the fixed builds run
+   Windows ARM64 the buggy build faults within seconds, every run; the fixed builds run
    indefinitely. On x86-64 the same buggy build does **not** fault.
 2. **Formal TLA+ models** (`tla/`) of the x86-TSO and ARM64 memory models, and
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
    use-after-free in the baseline and proves each fix closes it.
 
-> Terminology note: throughout, "fault" / "memory fault" / `0xC0000005` /
-> exit 134 all mean the process touched memory that had been unmapped — the
+> Terminology note: throughout, "fault" / "memory fault" / `0xC0000005` all
+> mean the process touched memory that had been unmapped — the
 > observable symptom of reclaiming memory that is still in use.
 
 ## Table of contents
@@ -164,7 +164,7 @@ In practice it is almost never observed because:
   GC write barriers, and interlocked operations) fully drains it immediately.
 
 So on x86 the reader's announce is visible to the scan essentially instantly, and
-the buggy build runs to completion — see `Dockerfile.x86`. This is why the defect
+the buggy build runs to completion on Windows x86-64. This is why the defect
 can sit in code for years: **all the CI and dev machines are x86.**
 
 **The epoch's own code accidentally fences it on x86.** This is worth spelling
@@ -263,7 +263,6 @@ to the *rare* reclaimer. Before the safe-epoch scan, the reclaimer issues a
 **process-wide** barrier that forces every other core to drain its store buffer:
 
 * Windows: `FlushProcessWriteBuffers()`
-* Linux: `membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED)`
 
 Readers perform no additional barrier on the hot path; the reclaimer issues the
 inter-processor interrupt. This is the technique used by RCU and by
@@ -281,8 +280,6 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 ```
 .
 ├── README.md
-├── Dockerfile.arm64                 # runs the repro on real ARM64 (faults on baseline)
-├── Dockerfile.x86                   # control: same source does NOT fault on x86-64
 ├── src/
 │   ├── LightEpoch.Implementations/  # the 4 epoch variants (shared library)
 │   │   ├── LightEpoch.cs                              # baseline (buggy)
@@ -290,7 +287,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   │   ├── FixedLightEpochWithInterlockedExchange.cs  # seq-cst RMW announce
 │   │   ├── FixedLightEpochAsymmetricBarrier.cs        # reclaimer-side barrier
 │   │   ├── AsymmetricBarrier.cs                       # FlushProcessWriteBuffers / membarrier
-│   │   ├── IEpochAccessor.cs · UtilityShim.cs · EpochOps.cs
+│   │   ├── UtilityShim.cs · EpochOps.cs
 │   ├── LightEpoch.Repro.Common/     # shared, self-judging litmus harness
 │   ├── LightEpoch.Repro.Bare/       # Resume -> access -> Suspend
 │   └── LightEpoch.Repro.Garnet/     # Garnet BasicContext epoch sequence
@@ -326,26 +323,7 @@ They differ only in the epoch sequence immediately before the shared access:
 | `LightEpoch.Repro.Bare` | `Resume()` → access → `Suspend()` | Minimal reproduction of the Acquire announce bug |
 | `LightEpoch.Repro.Garnet` | `Resume()` → `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()` | Epoch portion of Garnet's normal Tsavorite `BasicContext` operation |
 
-```bash
-# Build both repros on real ARM64 hardware (.NET 10):
-docker build -f Dockerfile.arm64 --build-arg REPRO=LightEpoch.Repro.Bare \
-  -t lightepoch-repro:bare-arm64 .
-docker build -f Dockerfile.arm64 --build-arg REPRO=LightEpoch.Repro.Garnet \
-  -t lightepoch-repro:garnet-arm64 .
-
-docker run --rm lightepoch-repro:bare-arm64   --impl baseline --rounds 200000000
-docker run --rm lightepoch-repro:garnet-arm64 --impl baseline --rounds 200000000
-
-# Run any fix by replacing baseline with fullbarrier, interlocked, or asymmetric.
-
-# x86-64 control — both baseline repros complete:
-docker build -f Dockerfile.x86 --build-arg REPRO=LightEpoch.Repro.Bare \
-  -t lightepoch-repro:bare-x86 .
-docker build -f Dockerfile.x86 --build-arg REPRO=LightEpoch.Repro.Garnet \
-  -t lightepoch-repro:garnet-x86 .
-```
-
-Or without Docker using a .NET 10 SDK:
+Run on Windows with a .NET 10 SDK:
 
 ```bash
 DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Bare -c Release -- \
@@ -355,7 +333,8 @@ DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Garnet -c Release --
 ```
 
 Exit code `0` = survived (no reclaim while a protected reader held the page);
-a non-zero or aborted exit (`134`) = a fault was observed. On genuine ARM64,
+an access-violation termination (`0xC0000005`) = a fault was observed. On
+Windows ARM64,
 both baseline repros fault; the fixed implementations survive. See §8 for the
 upstream Garnet call-path evidence.
 
@@ -403,8 +382,8 @@ object; if it exits `0`, it didn't. There is no oracle to argue with.
 
 ### 6.1 The two threads
 
-Two threads are pinned to two distinct physical cores (`Plat.Pin`, via
-`SetThreadAffinityMask` / `sched_setaffinity`) so their store buffers are
+Two threads are pinned to two distinct physical cores (`WindowsNative.Pin`, via
+`SetThreadAffinityMask`) so their store buffers are
 genuinely separate hardware:
 
 * **Reader** (`ReaderLoop`) — the *protected* accessor. The bare repro executes:
@@ -421,11 +400,11 @@ genuinely separate hardware:
   the second announce represented by `ops.Refresh()`.
 * **Reclaimer** (`ReclaimerLoop`) — links, unlinks, and retires a page each round:
   ```
-  page = Plat.Alloc(4096);          // a real OS page (VirtualAlloc / mmap)
+  page = WindowsNative.Alloc(4096); // a real OS page (VirtualAlloc)
   Volatile.Write(ref curPage, page);// link/publish the object
   --- round barrier ---
   curPage = 0;                      // STORE unlink (plain, like removing from a list)
-  ops.BumpCurrentEpoch(() => Plat.Free(page));  // hand the retired page to the epoch
+  ops.BumpCurrentEpoch(() => WindowsNative.Free(page)); // hand the retired page to the epoch
   ```
 
 Mapped onto the memory-model primer in §1.3, this is exactly the SB litmus:
@@ -435,18 +414,19 @@ announce — is precisely a reclaim-while-reading, i.e. a fault.
 
 ### 6.2 Why a fault is a *real* use-after-free, not a segfault trick
 
-`Plat.Alloc` maps a **whole OS page** and `Plat.Free` **fully unmaps** it
-(`VirtualFree(MEM_RELEASE)` / `munmap`). So the freed page's virtual addresses
+`WindowsNative.Alloc` maps a **whole OS page** and `WindowsNative.Free` **fully
+unmaps** it (`VirtualFree(MEM_RELEASE)`). So the freed page's virtual addresses
 become invalid at the hardware level — a subsequent read is a genuine access
-violation (`0xC0000005` on Windows, `SIGSEGV`→exit `134` on Linux), not a
+violation (`0xC0000005`), not a
 poisoned-value check we could get wrong. The page is 4 KB and the reader touches
 `pg[k & 511]` (the first 512 longs), so any read after unmap lands in the hole.
 
 ### 6.3 Why the epoch — not the harness — does the freeing
 
-This is the crux of "self-judging". The reclaimer does **not** call `Plat.Free`
-directly. It passes the unmap as the `onDrain` callback to the real public API
-`BumpCurrentEpoch(onDrain)`. Inside the unmodified implementation, the page is
+This is the crux of "self-judging". The reclaimer does **not** call
+`WindowsNative.Free` directly. It passes the unmap as the `onDrain` callback to
+the real public API `BumpCurrentEpoch(onDrain)`. Inside the epoch implementation,
+the page is
 only unmapped when the epoch's own `ComputeNewSafeToReclaimEpoch` +
 `Drain` logic decides the retire epoch is safe — i.e. when its scan of the
 thread slots concludes no reader is still in an older epoch. So a fault can only
@@ -477,8 +457,9 @@ Two design choices ensure the harness measures the epoch, not itself:
 ### 6.5 What each exit means
 
 * **Reader faults mid-dereference** → the epoch freed a page a protected reader
-  was reading → the process aborts (exit `134` / access violation). This is the
-  bug, and on ARM64 the `baseline` build hits it within seconds, every run.
+  was reading → the process terminates with access violation `0xC0000005`. This
+  is the bug, and on Windows ARM64 the `baseline` build hits it within seconds,
+  every run.
 * **Loop completes all rounds** → prints `Completed N rounds ... with NO fault`
   and returns `0`. This is what all three fixes do — indefinitely — and what
   even the `baseline` does on x86-64 (its store buffer drains too fast for the
@@ -688,13 +669,13 @@ and the formal model:
   `UnsafeSuspendThread` sequence per operation. `LightEpoch.Repro.Bare` omits
   only the refresh to isolate the original Acquire announce. On ARM64
   Neoverse-N2 both baselines **fault with
-  `System.AccessViolationException` (exit 134)**; all three fixes run
+  `System.AccessViolationException` (`0xC0000005`)**; all three fixes run
   indefinitely:
 
   | Project | baseline | fullbarrier | interlocked | asymmetric |
   |---|---|---|---|---|
-  | `LightEpoch.Repro.Bare` | **134 (fault)** | survives | survives | survives |
-  | `LightEpoch.Repro.Garnet` | **134 (fault)** | survives | survives | survives |
+  | `LightEpoch.Repro.Bare` | **access violation** | survives | survives | survives |
+  | `LightEpoch.Repro.Garnet` | **access violation** | survives | survives | survives |
 
 * **TLA+ (`LightEpochTsavorite` / `FixedLightEpochTsavorite`).** The per-op
   `Acquire`-announce → `ProtectAndDrain`-announce → operation-load → `Release`

@@ -4,7 +4,7 @@
 
 using System.Runtime.CompilerServices;
 
-namespace Tsavorite.core
+namespace LightEpoch.Core
 {
     internal static class Utility
     {

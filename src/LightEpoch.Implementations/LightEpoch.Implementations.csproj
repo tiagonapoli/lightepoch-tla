@@ -7,7 +7,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <Optimize>true</Optimize>
-    <RootNamespace>Tsavorite.core</RootNamespace>
+    <RootNamespace>LightEpoch.Core</RootNamespace>
     <AssemblyName>LightEpoch.Implementations</AssemblyName>
     <!-- The reclaim-race semantics require server GC (background-free) so a
          collection never masks the plain announce store's visibility window. -->

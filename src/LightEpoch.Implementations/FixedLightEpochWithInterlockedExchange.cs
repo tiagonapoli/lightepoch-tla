@@ -6,12 +6,12 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 
-namespace Tsavorite.core
+namespace LightEpoch.Core
 {
     /// <summary>
     /// Epoch protection
     /// </summary>
-    public sealed unsafe class FixedLightEpochWithInterlockedExchange : IEpochAccessor
+    public sealed unsafe class FixedLightEpochWithInterlockedExchange
     {
         /// <summary>
         /// Buffer to track information for LightEpoch instances. This is used:
@@ -385,20 +385,20 @@ namespace Tsavorite.core
             var i = 0;
             while (true)
             {
-                if (drainList[i].epoch == long.MaxValue)
+                if (Volatile.Read(ref drainList[i].epoch) == long.MaxValue)
                 {
                     // This was an empty slot. If it still is, assign this action/epoch to the slot.
                     if (Interlocked.CompareExchange(ref drainList[i].epoch, long.MaxValue - 1, long.MaxValue) == long.MaxValue)
                     {
                         drainList[i].action = onDrain;
-                        drainList[i].epoch = PriorEpoch;
+                        Volatile.Write(ref drainList[i].epoch, PriorEpoch);
                         _ = Interlocked.Increment(ref drainCount);
                         break;
                     }
                 }
                 else
                 {
-                    var triggerEpoch = drainList[i].epoch;
+                    var triggerEpoch = Volatile.Read(ref drainList[i].epoch);
 
                     if (triggerEpoch <= SafeToReclaimEpoch)
                     {
@@ -407,7 +407,7 @@ namespace Tsavorite.core
                         {
                             var triggerAction = drainList[i].action;
                             drainList[i].action = onDrain;
-                            drainList[i].epoch = PriorEpoch;
+                            Volatile.Write(ref drainList[i].epoch, PriorEpoch);
                             triggerAction();
                             break;
                         }
@@ -484,7 +484,7 @@ namespace Tsavorite.core
 
             for (var i = 0; i < kDrainListSize; i++)
             {
-                var trigger_epoch = drainList[i].epoch;
+                var trigger_epoch = Volatile.Read(ref drainList[i].epoch);
 
                 if (trigger_epoch <= SafeToReclaimEpoch)
                 {
@@ -493,7 +493,7 @@ namespace Tsavorite.core
                         // Store off the trigger action, then set epoch to int.MaxValue to mark this slot as "available for use".
                         var trigger_action = drainList[i].action;
                         drainList[i].action = null;
-                        drainList[i].epoch = long.MaxValue;
+                        Volatile.Write(ref drainList[i].epoch, long.MaxValue);
                         _ = Interlocked.Decrement(ref drainCount);
 
                         // Execute the action

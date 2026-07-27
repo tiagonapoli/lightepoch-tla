@@ -10,7 +10,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
-using Tsavorite.core;
+using LightEpoch.Core;
 
 namespace LightEpoch.Repro.Common
 {
@@ -228,7 +228,7 @@ namespace LightEpoch.Repro.Common
                 Priority = ThreadPriority.Highest
             };
             reader.Start();
-            Plat.Pin(reclaimerCore);
+            WindowsNative.Pin(reclaimerCore);
 
             var stopwatch = Stopwatch.StartNew();
             ReclaimerLoop();
@@ -244,7 +244,7 @@ namespace LightEpoch.Repro.Common
 
         void ReaderLoop()
         {
-            Plat.Pin(readerCore);
+            WindowsNative.Pin(readerCore);
 
             for (long round = 0; round < rounds && !stop; round++)
             {
@@ -276,7 +276,7 @@ namespace LightEpoch.Repro.Common
         {
             for (long round = 0; round < rounds; round++)
             {
-                byte* page = Plat.Alloc(PageSize);
+                byte* page = WindowsNative.Alloc(PageSize);
                 for (int index = 0; index < 512; index++)
                     ((long*)page)[index] = index;
                 Volatile.Write(ref curPage, (long)page);
@@ -285,7 +285,7 @@ namespace LightEpoch.Repro.Common
 
                 curPage = 0;
                 long pageAddress = (long)page;
-                ops.BumpCurrentEpoch(() => Plat.Free((byte*)pageAddress, PageSize));
+                ops.BumpCurrentEpoch(() => WindowsNative.Free((byte*)pageAddress, PageSize));
 
                 EndBarrier();
             }

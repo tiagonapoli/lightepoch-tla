@@ -1,6 +1,6 @@
 using System;
 
-namespace Tsavorite.core
+namespace LightEpoch.Core
 {
     /// <summary>
     /// Uniform surface over the epoch implementations for the repro harnesses.
