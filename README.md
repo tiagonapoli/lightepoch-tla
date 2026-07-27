@@ -38,9 +38,9 @@ to `stlr`/`ldar` — the exposure is inverted: ARM64 is accidentally safe and
 Every number below is from real hardware (Azure VMs and a local workstation),
 running the **unmodified** epoch implementation, with the epoch's own
 `BumpCurrentEpoch` → `ComputeNewSafeToReclaimEpoch` → drain logic deciding when to
-free. The harness never frees anything on its own. All runs in this section use
-`LightEpoch.Repro.Bare` (`Resume()` → access → `Suspend()`); the
-`ResumeAndRefresh` variant is covered in [§8.5](#85-reproducing-and-modelling-the-default-api-directly).
+free. The harness never frees anything on its own. Both repro variants are covered:
+`Bare` (`Resume()` → access → `Suspend()`) and `ResumeAndRefresh`, which mirrors a
+Tsavorite `BasicContext` operation ([§8](#8-how-tsavorite-actually-uses-lightepoch)).
 
 ### Hardware under test
 
@@ -60,12 +60,16 @@ Threads are always pinned one per **physical** core; SMT siblings are never pair
 Detection is a genuine unmapped-page fault. "Time to fault" is wall-clock from
 process start; `SURVIVED` means the run was killed at the cap with no fault.
 
-| CPU | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) |
-|---|---|---|---|
-| Cobalt 100 (N2) | 2 (1 pair) | **FAULT @ 19 s** | SURVIVED 600 s |
-| Ampere Altra (N1) | 2 (1 pair) | no fault in 120 s | SURVIVED 600 s |
-| Ampere Altra (N1) | 4 (2 pairs) | **FAULT @ 15 s** | SURVIVED 300 s |
-| Ampere Altra (N1) | 6 (3 pairs) | **FAULT @ 113 s** | SURVIVED 300 s |
+| CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) |
+|---|---|---|---|---|
+| Cobalt 100 / N2 (4) | `Bare` | 2 (1 pair) | **FAULT @ 19 s** | SURVIVED 600 s |
+| Cobalt 100 / N2 (4) | `ResumeAndRefresh` | 4 (2 pairs) | **FAULT @ 29 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (4) | `Bare` | 2 (1 pair) | no fault in 120 s | SURVIVED 600 s |
+| Ampere Altra / N1 (4) | `ResumeAndRefresh` | 4 (2 pairs) | no fault in 300 s | — |
+| Ampere Altra / N1 (8) | `Bare` | 4 (2 pairs) | **FAULT @ 15 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (8) | `Bare` | 6 (3 pairs) | **FAULT @ 113 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (8) | `ResumeAndRefresh` | 4 (2 pairs) | **FAULT @ 96 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (8) | `ResumeAndRefresh` | 6 (3 pairs) | no fault in 300 s | — |
 
 Faulting stack, every time — the reader dereferencing a page the epoch already freed:
 
@@ -77,9 +81,14 @@ System.AccessViolationException: Attempted to read or write protected memory.
    at System.Threading.Thread.StartCallback()
 ```
 
-Note the concurrency effect: on Neoverse-N1 a **single** litmus pair never faulted in
-120 s, but **two** concurrent pairs faulted in 15 s. Neoverse-N2 (Cobalt 100) faults
-with a single pair. The reordering is architecturally permitted on both.
+Two things about concurrency are worth noting. First, **more pairs is not
+monotonically better**: 2 pairs is the sweet spot on both repros, and 3 pairs takes
+longer to fault (`Bare`, 15 s → 113 s) or does not fault within the cap
+(`ResumeAndRefresh`). Extra pairs add scheduling jitter that de-aligns the
+per-round barrier, so the two threads' store/load windows overlap less precisely.
+Second, on Neoverse-N1 a **single** litmus pair never faulted in 120 s while **two**
+faulted in 15 s; Neoverse-N2 (Cobalt 100) faults with a single pair. The reordering
+is architecturally permitted on both — N1 simply has a narrower window.
 
 ### x86-64 — logical use-after-free detection
 
@@ -935,15 +944,22 @@ and the formal model:
 * **Repros.** `LightEpoch.Repro.ResumeAndRefresh` runs the epoch-critical
   `UnsafeResumeThread` (`Resume()` + `InternalRefresh()`/`ProtectAndDrain()`) …
   `UnsafeSuspendThread` sequence per operation. `LightEpoch.Repro.Bare` omits
-  only the refresh to isolate the original Acquire announce. On ARM64
-  Neoverse-N2 both baselines **fault with
-  `System.AccessViolationException` (`0xC0000005`)**; all three fixes run
-  indefinitely:
+  only the refresh to isolate the original Acquire announce. On ARM64 both
+  baselines **fault with `System.AccessViolationException` (`0xC0000005`)**; all
+  three fixes run indefinitely:
 
   | Project | baseline | fullbarrier | interlocked | asymmetric |
   |---|---|---|---|---|
   | `LightEpoch.Repro.Bare` | **access violation** | survives | survives | survives |
   | `LightEpoch.Repro.ResumeAndRefresh` | **access violation** | survives | survives | survives |
+
+  The extra `ProtectAndDrain()` announce does make the window harder to hit:
+  `ResumeAndRefresh` needs 2 pairs to fault where `Bare` faults with 1 on
+  Neoverse-N2 (29 s vs 19 s), and 96 s vs 15 s on the 8-core Neoverse-N1. That is
+  expected — the second announce re-publishes the same value, so it gives the
+  reclaimer's scan a second chance to observe a non-zero slot — but it is only a
+  probability change, not ordering: both announces are plain stores, so neither
+  provides the missing StoreLoad fence, and the fault still happens.
 
 * **TLA+ (`LightEpochResumeAndRefresh` / `FixedLightEpochResumeAndRefresh`).** The per-op
   `Acquire`-announce → `ProtectAndDrain`-announce → operation-load → `Release`
