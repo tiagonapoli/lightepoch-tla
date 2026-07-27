@@ -36,13 +36,13 @@ namespace LightEpoch.Repro.Common
     }
 
     /// <summary>
-    /// Epoch portion of a normal Tsavorite BasicContext operation.
+    /// Resume-then-Refresh epoch sequence, mirroring a normal Tsavorite BasicContext operation.
     /// ClientSession.UnsafeResumeThread calls Resume and then InternalRefresh;
     /// InternalRefresh begins with ProtectAndDrain, represented by Refresh here.
     /// </summary>
-    public readonly struct TsavoriteBasicContextReproPattern : IReproPattern
+    public readonly struct ResumeAndRefreshReproPattern : IReproPattern
     {
-        public string Name => "Tsavorite BasicContext";
+        public string Name => "Resume + Refresh";
         public string EpochSequence => "Resume() -> InternalRefresh()/ProtectAndDrain() -> access -> Suspend()";
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

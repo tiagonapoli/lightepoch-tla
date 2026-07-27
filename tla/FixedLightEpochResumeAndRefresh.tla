@@ -1,9 +1,9 @@
-------------------------- MODULE FixedLightEpochTsavorite -------------------------
+------------------------- MODULE FixedLightEpochResumeAndRefresh -------------------------
 (***************************************************************************)
-(* FixedLightEpochTsavorite — the FIX (full StoreLoad barrier) proved       *)
+(* FixedLightEpochResumeAndRefresh — the FIX (full StoreLoad barrier) proved       *)
 (* against Tsavorite's exact per-operation call sequence.                   *)
 (*                                                                         *)
-(* Same per-operation shape as MODULE LightEpochTsavorite:                  *)
+(* Same per-operation shape as MODULE LightEpochResumeAndRefresh:                  *)
 (*   Resume()/Acquire announce  -> ProtectAndDrain announce -> operation    *)
 (*   load -> Suspend()/Release (reset lce -> 0),                            *)
 (* but now BOTH announce sites carry a full StoreLoad barrier               *)

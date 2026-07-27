@@ -1,6 +1,6 @@
---------------------------- MODULE LightEpochTsavorite ---------------------------
+--------------------------- MODULE LightEpochResumeAndRefresh ---------------------------
 (***************************************************************************)
-(* LightEpochTsavorite — the BUGGY baseline, modeled through the exact call *)
+(* LightEpochResumeAndRefresh — the BUGGY baseline, modeled through the exact call *)
 (* sequence Tsavorite's default API (BasicContext) uses per operation.       *)
 (*                                                                         *)
 (* A BasicContext Read/Upsert/RMW wraps every operation in                  *)

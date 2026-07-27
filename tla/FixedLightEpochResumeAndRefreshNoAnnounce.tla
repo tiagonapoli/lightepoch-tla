@@ -1,6 +1,6 @@
-------------------- MODULE FixedLightEpochTsavoriteNoAnnounce -------------------
+------------------- MODULE FixedLightEpochResumeAndRefreshNoAnnounce -------------------
 (***************************************************************************)
-(* FixedLightEpochTsavoriteNoAnnounce — proves the "drop the second        *)
+(* FixedLightEpochResumeAndRefreshNoAnnounce — proves the "drop the second        *)
 (* announce" optimization is safe for Tsavorite's exact per-operation       *)
 (* call sequence.                                                           *)
 (*                                                                         *)
@@ -11,7 +11,7 @@
 (*   ... the operation load ...                                            *)
 (*   UnsafeSuspendThread() = Suspend()/Release  (reset lce -> 0).           *)
 (*                                                                         *)
-(* MODULE FixedLightEpochTsavorite fences BOTH announce sites, so the       *)
+(* MODULE FixedLightEpochResumeAndRefresh fences BOTH announce sites, so the       *)
 (* per-op path pays TWO StoreLoad barriers. This module models the          *)
 (* optimization: Resume()/Acquire still announces + fences, but the         *)
 (* immediately-following refresh call is ProtectAndDrainWithoutAnnounce()   *)

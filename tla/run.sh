@@ -57,10 +57,10 @@ run "$HERE" FixedLightEpochWithInterlocked        FixedLightEpochWithInterlocked
 run "$HERE" FixedLightEpochWithAsymmetricBarrier  FixedLightEpochWithAsymmetricBarrier.cfg  HOLDS    "reclaimer-side barrier"
 
 echo ""
-echo "========= Tsavorite per-operation API specs (Resume+Refresh+Suspend) ========="
-run "$HERE" LightEpochTsavorite                   LightEpochTsavorite.cfg                   VIOLATED "both per-op announces unfenced"
-run "$HERE" FixedLightEpochTsavorite              FixedLightEpochTsavorite.cfg              HOLDS    "fence at both announce sites"
-run "$HERE" FixedLightEpochTsavoriteNoAnnounce    FixedLightEpochTsavoriteNoAnnounce.cfg    HOLDS    "fence only Acquire; drop the redundant 2nd announce"
+echo "========= Resume+Refresh per-operation API specs (Resume+Refresh+Suspend) ========="
+run "$HERE" LightEpochResumeAndRefresh                   LightEpochResumeAndRefresh.cfg                   VIOLATED "both per-op announces unfenced"
+run "$HERE" FixedLightEpochResumeAndRefresh              FixedLightEpochResumeAndRefresh.cfg              HOLDS    "fence at both announce sites"
+run "$HERE" FixedLightEpochResumeAndRefreshNoAnnounce    FixedLightEpochResumeAndRefreshNoAnnounce.cfg    HOLDS    "fence only Acquire; drop the redundant 2nd announce"
 
 echo ""
 if [[ $failures -ne 0 ]]; then

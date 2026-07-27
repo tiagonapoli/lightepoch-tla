@@ -294,7 +294,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
 │   │   ├── UtilityShim.cs · EpochOps.cs
 │   ├── LightEpoch.Repro.Common/     # shared, self-judging litmus harness
 │   ├── LightEpoch.Repro.Bare/       # Resume -> access -> Suspend
-│   └── LightEpoch.Repro.Tsavorite/  # Tsavorite BasicContext epoch sequence
+│   └── LightEpoch.Repro.ResumeAndRefresh/  # Resume -> Refresh -> access -> Suspend
 └── tla/
     ├── memory-models/               # the memory models themselves
     │   ├── X86TSO.tla · ARM64.tla
@@ -302,8 +302,8 @@ All three fixes are proven safe in `tla/` (`FixedLightEpoch`,
     ├── FixedLightEpoch.tla                         # fix 1   -> HOLDS
     ├── FixedLightEpochWithInterlocked.tla          # fix 2   -> HOLDS
     ├── FixedLightEpochWithAsymmetricBarrier.tla    # fix 3   -> HOLDS
-    ├── LightEpochTsavorite.tla                     # Tsavorite per-op API, buggy -> VIOLATED
-    ├── FixedLightEpochTsavorite.tla                # Tsavorite per-op API, fixed -> HOLDS
+    ├── LightEpochResumeAndRefresh.tla                     # Tsavorite per-op API, buggy -> VIOLATED
+    ├── FixedLightEpochResumeAndRefresh.tla                # Tsavorite per-op API, fixed -> HOLDS
     └── run.sh · Dockerfile
 ```
 
@@ -325,14 +325,14 @@ They differ only in the epoch sequence immediately before the shared access:
 | Project | Reader sequence per operation | Purpose |
 |---|---|---|
 | `LightEpoch.Repro.Bare` | `Resume()` → access → `Suspend()` | Minimal reproduction of the Acquire announce bug |
-| `LightEpoch.Repro.Tsavorite` | `Resume()` → `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()` | Epoch portion of a normal Tsavorite `BasicContext` operation |
+| `LightEpoch.Repro.ResumeAndRefresh` | `Resume()` → `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()` | Epoch portion of a normal Tsavorite `BasicContext` operation |
 
 Run on Windows with a .NET 10 SDK:
 
 ```bash
 DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Bare -c Release -- \
   --impl baseline --rounds 200000000
-DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.Tsavorite -c Release -- \
+DOTNET_gcServer=1 dotnet run --project src/LightEpoch.Repro.ResumeAndRefresh -c Release -- \
   --impl baseline --rounds 200000000
 ```
 
@@ -362,16 +362,16 @@ Expected outcomes:
 | `FixedLightEpoch` | — | HOLDS |
 | `FixedLightEpochWithInterlocked` | — | HOLDS |
 | `FixedLightEpochWithAsymmetricBarrier` | — | HOLDS |
-| `LightEpochTsavorite` (per-op `Resume`+`Refresh`+`Suspend`) | — | VIOLATED |
-| `FixedLightEpochTsavorite` (both announce sites fenced) | — | HOLDS |
-| `FixedLightEpochTsavoriteNoAnnounce` (fence only Acquire; drop 2nd announce) | — | HOLDS |
+| `LightEpochResumeAndRefresh` (per-op `Resume`+`Refresh`+`Suspend`) | — | VIOLATED |
+| `FixedLightEpochResumeAndRefresh` (both announce sites fenced) | — | HOLDS |
+| `FixedLightEpochResumeAndRefreshNoAnnounce` (fence only Acquire; drop 2nd announce) | — | HOLDS |
 
 The last three model **Tsavorite's default per-operation API** (§8): the buggy
 spec issues both announce stores (Acquire and ProtectAndDrain) with no fence and
 is VIOLATED; fencing both sites HOLDS; and — the optimization — fencing **only**
 Acquire while dropping the redundant second announce (`ProtectAndDrainWithoutAnnounce`)
 also HOLDS (§8.6). A negative control confirms the model has teeth: removing the
-Acquire fence too makes `FixedLightEpochTsavoriteNoAnnounce` VIOLATE.
+Acquire fence too makes `FixedLightEpochResumeAndRefreshNoAnnounce` VIOLATE.
 
 ---
 
@@ -651,7 +651,7 @@ it best.
 The default `BasicContext` sequence is exercised by both the executable repro
 and the formal model:
 
-* **Repros.** `LightEpoch.Repro.Tsavorite` runs the epoch-critical
+* **Repros.** `LightEpoch.Repro.ResumeAndRefresh` runs the epoch-critical
   `UnsafeResumeThread` (`Resume()` + `InternalRefresh()`/`ProtectAndDrain()`) …
   `UnsafeSuspendThread` sequence per operation. `LightEpoch.Repro.Bare` omits
   only the refresh to isolate the original Acquire announce. On ARM64
@@ -662,9 +662,9 @@ and the formal model:
   | Project | baseline | fullbarrier | interlocked | asymmetric |
   |---|---|---|---|---|
   | `LightEpoch.Repro.Bare` | **access violation** | survives | survives | survives |
-  | `LightEpoch.Repro.Tsavorite` | **access violation** | survives | survives | survives |
+  | `LightEpoch.Repro.ResumeAndRefresh` | **access violation** | survives | survives | survives |
 
-* **TLA+ (`LightEpochTsavorite` / `FixedLightEpochTsavorite`).** The per-op
+* **TLA+ (`LightEpochResumeAndRefresh` / `FixedLightEpochResumeAndRefresh`).** The per-op
   `Acquire`-announce → `ProtectAndDrain`-announce → operation-load → `Release`
   sequence, model-checked exhaustively: the unfenced spec is **VIOLATED**, and
   fencing both announce sites **HOLDS**.
@@ -707,7 +707,7 @@ A hot path that resumes-then-refreshes (Tsavorite's `UnsafeResumeThread`) would
 call `Resume()` (fenced announce) + `ProtectAndDrainWithoutAnnounce()` (no fence),
 eliminating one of the two per-operation fences with no change to the reclaimer.
 
-**Proved, not asserted.** `tla/FixedLightEpochTsavoriteNoAnnounce.tla` models
+**Proved, not asserted.** `tla/FixedLightEpochResumeAndRefreshNoAnnounce.tla` models
 exactly this — Acquire announces + fences, the refresh performs no announce — and
 `NoUseAfterFree` **HOLDS** exhaustively. A negative control (removing the Acquire
 fence as well) makes the same spec **VIOLATE**, confirming the single Acquire
