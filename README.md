@@ -1,4 +1,4 @@
-# LightEpoch and the missing StoreLoad fence
+# LightEpoch memory-ordering study: missing StoreLoad fence
 
 This repository is a self-contained, reproducible study of a **memory-ordering
 bug in an epoch-based safe-memory-reclamation (SMR) scheme** called
