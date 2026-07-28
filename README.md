@@ -290,10 +290,6 @@ time the page faults the evidence is gone. The TLA+ model can: TLC explores ever
 interleaving of the two threads and every possible moment the store buffer drains, and
 when it finds a violation it prints the shortest path to it.
 
-This section walks through that path. It is the machine-checked answer to the
-question "how can a thread announce that it is inside a critical section, and the
-reclaimer still not see it?"
-
 Reproduce it yourself:
 
 ```powershell
@@ -323,7 +319,7 @@ So the reader thread genuinely believes it announced itself, while the reclaimer
 thread genuinely observes an empty slot. **Both are reading correctly.** No cache is
 "stale" in the sense of a bug; this is architecturally permitted behaviour.
 
-In the trace, that queue is `storeBuffer` (one per thread) and memory is `memory`:
+In the TLA+ trace, that queue is `storeBuffer` (one per thread) and memory is `memory`:
 
 | Symbol | Meaning | Production equivalent |
 | --- | --- | --- |
@@ -337,13 +333,120 @@ In the trace, that queue is `storeBuffer` (one per thread) and memory is `memory
 | `readerAnnouncedEpoch` | what the reader *thinks* it published | the value it stored into its slot |
 | `triggerEpoch` | epoch the retire was tagged with | `epoch.BumpCurrentEpoch(onDrain)` |
 
-The safety property is one line — never free while a reader is still inside:
+The safety property in the TLA+ model is one line — never free while a reader is still
+inside:
 
 ```tla
 NoUseAfterFree == ~ (memory.objectFreed /\ readerInCriticalSection)
 ```
 
-### The trace
+### The raw TLC output
+
+This is the counterexample exactly as TLC prints it, unedited:
+
+```
+TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
+Warning: Please run the Java VM which executes TLC with a throughput optimized garbage collector by passing the "-XX:+UseParallelGC" property.
+(Use the -nowarning option to disable this warning.)
+Running breadth-first search Model-Checking with fp 108 and seed -8976058988207400573 with 1 worker on 20 cores with 7984MB heap and 64MB offheap memory [pid: 7] (Linux 6.6.87.2-microsoft-standard-WSL2 amd64, Eclipse Adoptium 21.0.11 x86_64, MSBDiskFPSet, DiskStateQueue).
+Parsing file /work/epoch/LightEpoch.tla
+Parsing file /tmp/Naturals.tla
+Parsing file /tmp/Sequences.tla
+Parsing file /work/StoreBuffer.tla
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module StoreBuffer
+Semantic processing of module LightEpoch
+Starting... (2026-07-28 03:41:31)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-07-28 03:41:31.
+Error: Invariant NoUseAfterFree is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ readerPc = "Acquire"
+/\ readerInCriticalSection = FALSE
+/\ triggerEpoch = 0
+/\ reclaimerPc = "Unlink"
+/\ readerAnnouncedEpoch = 0
+/\ storeBuffer = [Reader |-> <<>>, Reclaimer |-> <<>>]
+/\ memory = [ currentEpoch |-> 1,
+  localCurrentEpoch |-> 0,
+  objectUnlinked |-> FALSE,
+  objectFreed |-> FALSE ]
+
+State 2: <Acquire line 75, col 5 to line 79, col 79 of module LightEpoch>
+/\ readerPc = "ReadObject"
+/\ readerInCriticalSection = FALSE
+/\ triggerEpoch = 0
+/\ reclaimerPc = "Unlink"
+/\ readerAnnouncedEpoch = 1
+/\ storeBuffer = [Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>, Reclaimer |-> <<>>]
+/\ memory = [ currentEpoch |-> 1,
+  localCurrentEpoch |-> 0,
+  objectUnlinked |-> FALSE,
+  objectFreed |-> FALSE ]
+
+State 3: <ReadObject line 84, col 5 to line 87, col 89 of module LightEpoch>
+/\ readerPc = "Dereference"
+/\ readerInCriticalSection = TRUE
+/\ triggerEpoch = 0
+/\ reclaimerPc = "Unlink"
+/\ readerAnnouncedEpoch = 1
+/\ storeBuffer = [Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>, Reclaimer |-> <<>>]
+/\ memory = [ currentEpoch |-> 1,
+  localCurrentEpoch |-> 0,
+  objectUnlinked |-> FALSE,
+  objectFreed |-> FALSE ]
+
+State 4: <Unlink line 105, col 5 to line 108, col 98 of module LightEpoch>
+/\ readerPc = "Dereference"
+/\ readerInCriticalSection = TRUE
+/\ triggerEpoch = 0
+/\ reclaimerPc = "BumpCurrentEpoch"
+/\ readerAnnouncedEpoch = 1
+/\ storeBuffer = [ Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>,
+  Reclaimer |-> <<[f |-> "objectUnlinked", v |-> TRUE]>> ]
+/\ memory = [ currentEpoch |-> 1,
+  localCurrentEpoch |-> 0,
+  objectUnlinked |-> FALSE,
+  objectFreed |-> FALSE ]
+
+State 5: <BumpCurrentEpoch line 114, col 5 to line 120, col 76 of module LightEpoch>
+/\ readerPc = "Dereference"
+/\ readerInCriticalSection = TRUE
+/\ triggerEpoch = 1
+/\ reclaimerPc = "ComputeNewSafeToReclaimEpoch"
+/\ readerAnnouncedEpoch = 1
+/\ storeBuffer = [Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>, Reclaimer |-> <<>>]
+/\ memory = [ currentEpoch |-> 2,
+  localCurrentEpoch |-> 0,
+  objectUnlinked |-> TRUE,
+  objectFreed |-> FALSE ]
+
+State 6: <ComputeNewSafeToReclaimEpoch line 130, col 5 to line 138, col 103 of module LightEpoch>
+/\ readerPc = "Dereference"
+/\ readerInCriticalSection = TRUE
+/\ triggerEpoch = 1
+/\ reclaimerPc = "Done"
+/\ readerAnnouncedEpoch = 1
+/\ storeBuffer = [Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>, Reclaimer |-> <<>>]
+/\ memory = [ currentEpoch |-> 2,
+  localCurrentEpoch |-> 0,
+  objectUnlinked |-> TRUE,
+  objectFreed |-> TRUE ]
+
+54 states generated, 36 distinct states found, 15 states left on queue.
+The depth of the complete state graph search is 6.
+The average outdegree of the complete state graph is 2 (minimum is 0, the maximum 3 and the 95th percentile is 3).
+Finished in 00s at (2026-07-28 03:41:31)
+```
+
+`Error: Invariant NoUseAfterFree is violated.` is the result: on x86-TSO, with no
+fence on the announce, the object *can* be freed while the reader is inside. The
+`readerPc`/`reclaimerPc` fields are each thread's program counter, so the two threads
+can be read off independently down the trace.
+
+### The same trace, step by step
 
 TLC finds the violation in **five steps** (six states, counting the initial one). Watch
 one value: `memory.localCurrentEpoch`. It is `0` — "no reader present" — for the entire
