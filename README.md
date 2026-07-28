@@ -175,17 +175,15 @@ So `--quarantine` mode pre-allocates the pages and never unmaps them: when a pag
 "freed", a poison value is written over it. A reader that reads poison has touched
 memory the epoch already reclaimed — a genuine epoch bug.
 
-Run plainly, violations are extremely rare — historically about one per 2.4 billion
-pair-rounds. Reproducing them at a useful rate required adding **read-only "disturber"
-threads** that do nothing but read the epoch table, keeping its cache line shared and
-so delaying the reader's announce long enough to be observed. Reads cannot change an
-epoch decision, so they cannot manufacture a false positive, and the implementation
-under test is untouched. Disturbers must be pinned to **distinct physical cores**;
-put them on SMT siblings and they produce no coherence traffic, silently dropping the
-yield to zero.
+Run plainly, violations are extremely rare. Reproducing them at a useful rate
+required adding **read-only "disturber" threads** that do nothing but read the epoch
+table, keeping its cache line shared and so delaying the reader's announce long
+enough to cause the bug. Reads cannot change an epoch decision, so they cannot
+manufacture a false positive, and the implementation under test is untouched.
+Disturbers must be pinned to **distinct physical cores**, and SMT siblings must be
+avoided — they produce no coherence traffic, silently dropping the yield to zero.
 
-With up to 10 disturbers per pair, and each pair's reader and reclaimer straddling
-the highest-latency boundary on its machine:
+With up to 10 disturbers per pair:
 
 | CPU | Pattern | Impl | Violations | Rounds | Exec time | Violations / 1M rounds |
 |---|---|---|---|---|---|---|
@@ -199,8 +197,10 @@ the highest-latency boundary on its machine:
 | Xeon 8171M | `resume-and-refresh` | `fullbarrier` | 0 | 60,000,000 | ~165 s | 0 |
 | | | **total** | **3,739 / 0** | 410,000,000 | ~22 min | |
 
-Each pair is a separate process, pinned by hand. On the EPYC two run concurrently,
-straddling the LP 0-15 / LP 16-31 latency boundary:
+A **pair** is one reader thread plus one reclaimer thread, and each pair runs in its
+own process with every core pinned explicitly. On the EPYC two processes run
+concurrently, each putting its reader and its reclaimer on opposite sides of the
+LP 0-15 / LP 16-31 latency boundary:
 
 ```
 dotnet LightEpoch.Repro.dll --impl baseline --pattern bare --pairs 1 --rounds 5000000 --quarantine \
@@ -209,8 +209,8 @@ dotnet LightEpoch.Repro.dll --impl baseline --pattern bare --pairs 1 --rounds 50
     --reclaimer-core 12 --reader-core 28 --disturber-cores 3,5,7,9,11,19,21,23,25,27
 ```
 
-On the Xeon three run concurrently, each straddling the two sockets (socket 0 =
-LP 0-31, socket 1 = LP 32-63):
+On the Xeon three run concurrently, each with its reader and its reclaimer on
+different sockets (socket 0 = LP 0-31, socket 1 = LP 32-63):
 
 ```
     --reclaimer-core 0  --reader-core 32 --disturber-cores 2,4,6,8,10,34,36,38,40,42
@@ -221,11 +221,7 @@ LP 0-31, socket 1 = LP 32-63):
 `--impl fullbarrier` and `--pattern resume-and-refresh` are run with the identical
 core assignments.
 
-The control is what makes this meaningful: `fullbarrier` recorded **0 violations
-across 13.7 million sampled race-window rounds**, while *entering* the window more
-often than the baseline (on the Xeon, 2,104,411 sampled rounds against 1,400,545). It
-visits the dangerous interleaving more and never corrupts, which isolates the missing
-fence from any property of the harness.
+The control is what makes this meaningful: `fullbarrier` recorded **0 violations**.
 
 ---
 
