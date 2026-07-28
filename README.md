@@ -69,9 +69,9 @@ process start; `SURVIVED` means the run was killed at the cap with no fault.
 | Cobalt 100 / N2 (16) | `bare` | 8 (4 pairs) | no fault in 120 s | — |
 | Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | **FAULT @ 7 s** | SURVIVED 300 s |
 | Cobalt 100 / N2 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 73 s** | — |
-| Ampere Altra / N1 (16) | `bare` | 4 (2 pairs) | no fault in 120 s | — |
-| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | no fault in 120 s | — |
-| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | no fault in 120 s | — |
+| Ampere Altra / N1 (16) | `bare` | 4 (2 pairs) | no fault in 120 s *(capped)* | — |
+| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — |
+| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | no fault in 120 s *(capped)* | — |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s |
 
@@ -79,9 +79,12 @@ Concurrency is the dominant factor in how fast the window opens: every extra pai
 another independent chance per unit time for the reclaimer's scan to run before the
 reader's unfenced announce becomes visible. Two results make the point sharply:
 
-* **Neoverse-N1 never faulted under `bare` at any pair count, on any core count.**
-  It reproduces only under `resume-and-refresh` — the sequence a real Tsavorite
-  `BasicContext` operation performs. Neoverse-N2 reproduces under both.
+* **`bare` is much harder to reproduce on Neoverse-N1 than on N2.** N2 faults under
+  `bare` within seconds; N1 did not fault under `bare` in any 120 s run at 16 cores,
+  and needed 8 cores and up to 113 s to fault in the 8-core runs above. Under
+  `resume-and-refresh` — the sequence a real Tsavorite `BasicContext` operation
+  performs — N1 faults readily. The 120 s runs are capped observations, not proof of
+  absence.
 * **N1 at 4 physical cores produced no fault at all**; 8 and 16 cores are what make it
   reproducible.
 
@@ -155,9 +158,10 @@ anything. Counts below are use-after-free **reads** observed:
 * **The failure is repeatable, not a one-off.** 50 independent faults were collected
   back to back on Neoverse-N2, at a 98 % hit rate.
 * **How easily it reproduces varies enormously by microarchitecture and workload
-  shape.** Neoverse-N2 faults under the minimal `bare` sequence within seconds;
-  Neoverse-N1 never faults under `bare` at all and needs both the Tsavorite-like
-  `resume-and-refresh` sequence and 8+ physical cores. A clean run on one ARM64 part
+  shape.** Neoverse-N2 faults under the minimal `bare` sequence within seconds, and
+  under `resume-and-refresh` too. Neoverse-N1 needs 8+ physical cores before it faults
+  at all, and reproduces far more readily under the Tsavorite-like
+  `resume-and-refresh` sequence than under `bare`. A clean run on one ARM64 part
   therefore says nothing about another.
 
 ---
