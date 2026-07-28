@@ -37,8 +37,6 @@ The bug is demonstrated in two complementary ways:
   * [Note on StoreBuffer](#note-on-storebuffer)
   * [The raw TLC output](#the-raw-tlc-output)
   * [The same trace, step by step](#the-same-trace-step-by-step)
-  * [What actually fixes it, and what does not](#what-actually-fixes-it-and-what-does-not)
-  * [The same trace, in production shape](#the-same-trace-in-production-shape)
   * [Reading the model yourself](#reading-the-model-yourself)
 
 ---
@@ -628,44 +626,6 @@ ARM64 the reader's next dereference of that page takes an access violation
 The reader's announce is *still* in its store buffer, unflushed, at the moment the
 memory is released.
 
-### What actually fixes it, and what does not
-
-The reader must not be allowed to *load* `ret` until its announce *store* is globally
-visible. That specific constraint — no load may float above an earlier store — is a
-**StoreLoad** barrier, the one ordering x86-TSO does **not** give away for free.
-
-Why the alternatives do not work:
-
-| Attempt | Why it does not work |
-| --- | --- |
-| Mark the field `volatile` | On x86 a release store is *already* a plain store; TSO gives release semantics for free. It orders StoreStore and LoadLoad, **not StoreLoad**. The window is untouched. |
-| "`Interlocked.Increment` is a barrier" | It is — on the **reclaimer's** core. Barriers are local. It cannot drain the reader's buffer (step 4). |
-| "The CAS when acquiring the slot is a barrier" | It is, but it runs *before* the announce store. Fencing before a store says nothing about that store versus a *later* load. |
-| Add a fence in `ComputeNewSafeToReclaimEpoch` | The reclaimer can flush only its own buffer. It cannot pull the reader's queued announce into memory. |
-
-The fix must be on the **reader's** core, between the announce and the first load:
-
-```csharp
-(*(tableAligned + entry)).localCurrentEpoch = CurrentEpoch;
-Interlocked.MemoryBarrier();   // ← drain THIS core's store buffer before any load
-```
-
-With that barrier the reader cannot reach step 2 while its announce is still queued, so
-by the time the reclaimer scans in step 5 the slot reads `1`, the scan computes
-`SafeToReclaimEpoch = 0`, and the retire at epoch 1 is held back. TLC confirms this:
-`FixedLightEpochWithMemoryBarrier` **HOLDS** under both memory models.
-
-### The same trace, in production shape
-
-`LightEpoch.tla` models the bare enter path. Tsavorite does not call it that way — it
-runs `Resume()` → `ProtectAndDrain()` → operation → `Suspend()` per operation, which
-announces at **two** sites
-([`LightEpoch.cs:545`](src/LightEpoch.Implementations/LightEpoch.cs#L545) and
-[`:304`](src/LightEpoch.Implementations/LightEpoch.cs#L304)), both unfenced.
-`LightEpochResumeAndRefresh.tla` models that exact sequence and is **also VIOLATED**,
-which is what carries the result from "a bug in the abstract algorithm" to "a bug
-reachable through the API Tsavorite actually uses."
-
 ### Reading the model yourself
 
 | File | What it is |
@@ -676,9 +636,10 @@ reachable through the API Tsavorite actually uses."
 | [`tla/epoch/LightEpochResumeAndRefresh.tla`](tla/epoch/LightEpochResumeAndRefresh.tla) | Tsavorite's per-operation sequence. **VIOLATED.** |
 | [`tla/epoch/fixes/`](tla/epoch/fixes) | The same two specs with the barrier added. **HOLD.** |
 
-Each spec is checked under two memory models: `tso` (x86, only StoreLoad relaxed) and
-`arm` (additionally allows a core's stores to become visible out of order). Every TSO
-behaviour is also an ARM behaviour, so a violation under `tso` is the conservative
-result, and the fixes holding under `arm` shows they do not secretly depend on
-FIFO drain order.
+Each **epoch** spec is checked under both memory models defined in `StoreBuffer.tla`:
+`tso` (x86, FIFO store-buffer drain, only StoreLoad relaxed) and `arm` (additionally
+relaxes StoreStore, so any pending store may drain first). Every `tso` behaviour is
+also an `arm` behaviour, so VIOLATED under `tso` implies VIOLATED under `arm`, and
+HOLDS under `arm` implies HOLDS under `tso`. `X86TSO.tla` is the exception: it is the
+litmus calibration, so it runs under its own `NoFence` and `Fence` configs instead.
 
