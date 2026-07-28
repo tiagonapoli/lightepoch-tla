@@ -167,8 +167,9 @@ System.AccessViolationException: Attempted to read or write protected memory.
 
 ### x86-64 — logical use-after-free detection
 
-The previous memory map/unmap workload cannot be used here: on x86 the unmap forces a
-TLB-shootdown IPI, which fences the reader and closes the very window under test
+The previous memory allocate/free workload cannot be used here: on x86 the unmap
+forces a TLB-shootdown IPI, which fences the reader and closes the very window under
+test
 ([Appendix A](Draft.md#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
 So `--quarantine` mode pre-allocates the pages and never unmaps them: when a page is
 "freed", a poison value is written over it. A reader that reads poison has touched
