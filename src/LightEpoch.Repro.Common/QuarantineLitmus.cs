@@ -59,14 +59,24 @@ namespace LightEpoch.Repro.Common
         private readonly int readerCore;
         private readonly int reclaimerCore;
         private readonly bool selfTest;
+        private readonly int reclaimerDelay;
+        private readonly bool jitter;
+        private readonly int[] disturberCores;
+        private long lastViolationRound = -1;
+        private const int DecileCount = 10;
+        private readonly long[] violationDeciles = new long[DecileCount];
+        private ulong rngState = 0x9E3779B97F4A7C15;
 
-        public QuarantineLitmus(long rounds, int deref, int readerCore, int reclaimerCore, bool selfTest = false)
+        public QuarantineLitmus(long rounds, int deref, int readerCore, int reclaimerCore, bool selfTest = false, int reclaimerDelay = 0, bool jitter = false, int[] disturberCores = null)
         {
             this.rounds = rounds;
             this.deref = deref;
             this.readerCore = readerCore;
             this.reclaimerCore = reclaimerCore;
             this.selfTest = selfTest;
+            this.reclaimerDelay = reclaimerDelay;
+            this.jitter = jitter;
+            this.disturberCores = disturberCores ?? Array.Empty<int>();
             ops = new TOps();
             pattern = new TPattern();
             firstViolationRound = -1;
@@ -91,6 +101,21 @@ namespace LightEpoch.Repro.Common
                 Priority = ThreadPriority.Highest
             };
             reader.Start();
+
+            // Disturber threads only read the epoch table, so they cannot influence any
+            // epoch decision. Their job is to keep the table's cache lines shared rather
+            // than exclusively owned by the announcing thread: an announce into a shared
+            // line must first win an RFO, and since x86 store buffers commit in order,
+            // that pins the announce in the buffer long enough for the missing StoreLoad
+            // fence to become observable.
+            var disturbers = new Thread[disturberCores.Length];
+            for (int i = 0; i < disturberCores.Length; i++)
+            {
+                int core = disturberCores[i];
+                disturbers[i] = new Thread(() => DisturberLoop(core)) { IsBackground = true, Name = $"disturber{core}" };
+                disturbers[i].Start();
+            }
+
             WindowsNative.Pin(reclaimerCore);
 
             var stopwatch = Stopwatch.StartNew();
@@ -104,7 +129,11 @@ namespace LightEpoch.Repro.Common
             long sampled = Volatile.Read(ref observedPages);
             if (observed > 0)
             {
-                Console.Error.WriteLine($"USE-AFTER-FREE: reader read a quarantined page while protected. violations={observed:N0} firstRound={Volatile.Read(ref firstViolationRound):N0} elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
+                // Spread of violations across the run. A run that only fails in the first
+                // decile would mean the harness reaches some absorbing state and stops
+                // racing, which would make the totals meaningless.
+                string spread = string.Join(" ", violationDeciles);
+                Console.Error.WriteLine($"USE-AFTER-FREE: reader read a quarantined page while protected. violations={observed:N0} firstRound={Volatile.Read(ref firstViolationRound):N0} lastRound={Volatile.Read(ref lastViolationRound):N0} deciles=[{spread}] elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
                 return 1;
             }
 
@@ -113,6 +142,20 @@ namespace LightEpoch.Repro.Common
             // result says nothing about the memory model.
             Console.WriteLine($"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s with NO violation. sampledRounds={sampled:N0} drains={Volatile.Read(ref drains):N0} quarantined={Volatile.Read(ref quarantines):N0} sink={Volatile.Read(ref sink)}");
             return 0;
+        }
+
+        private void DisturberLoop(int core)
+        {
+            WindowsNative.Pin(core);
+
+            long local = 0;
+            while (!stop)
+            {
+                for (int i = 0; i < 64; i++)
+                    local += ops.ReadAllEntries();
+            }
+
+            Interlocked.Add(ref sink, local);
         }
 
         private void ReaderLoop()
@@ -156,6 +199,8 @@ namespace LightEpoch.Repro.Common
             {
                 Interlocked.Increment(ref violations);
                 Interlocked.CompareExchange(ref firstViolationRound, round, -1);
+                Volatile.Write(ref lastViolationRound, round);
+                violationDeciles[(int)(round * DecileCount / rounds)]++;
             }
         }
 
@@ -177,6 +222,15 @@ namespace LightEpoch.Repro.Common
 
                 StartBarrier();
 
+                // Align the unlink with the reader's announce. Leaving the barrier, the
+                // reclaimer reaches this store in one instruction while the reader must
+                // first run the slot-reservation CAS inside Acquire(), so without a delay
+                // the unlink is already visible by the time the reader loads curPage and
+                // the race window never opens. Spinning here is the litmus-test "delay"
+                // knob; it shifts only when the reclaimer acts, never what it does.
+                if (reclaimerDelay > 0)
+                    Thread.SpinWait(NextDelay());
+
                 curPage = 0;
 
                 // Self-test: poison unconditionally, as if the epoch had wrongly decided the
@@ -193,6 +247,20 @@ namespace LightEpoch.Repro.Common
             }
 
             ops.Suspend();
+        }
+
+        // Per-round spin length. Jitter sweeps the whole alignment space instead of
+        // betting on one offset, since the resonant delay differs per core pair.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private int NextDelay()
+        {
+            if (!jitter)
+                return reclaimerDelay;
+
+            rngState ^= rngState << 13;
+            rngState ^= rngState >> 7;
+            rngState ^= rngState << 17;
+            return (int)(rngState % (ulong)(reclaimerDelay + 1));
         }
 
         // Stands in for the unmap: the epoch has decided this page is safe to recycle, so

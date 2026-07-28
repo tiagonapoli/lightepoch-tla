@@ -97,6 +97,9 @@ namespace LightEpoch.Repro.Common
             bool crossNuma = false;
             bool quarantine = false;
             bool selfTest = false;
+            int reclaimerDelay = 0;
+            bool jitter = false;
+            int[] disturberCores = Array.Empty<int>();
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -139,6 +142,20 @@ namespace LightEpoch.Repro.Common
                     case "--quarantine":
                         quarantine = true;
                         break;
+                    case "--reclaimer-delay":
+                        if (!TryReadInt(args, ref i, out reclaimerDelay))
+                            return InvalidValue(arg);
+                        break;
+                    case "--jitter":
+                        jitter = true;
+                        break;
+                    case "--disturber-cores":
+                        if (!TryRead(args, ref i, out string coreList))
+                            return MissingValue(arg);
+                        disturberCores = ParseCoreList(coreList);
+                        if (disturberCores == null)
+                            return InvalidValue(arg);
+                        break;
                     case "--self-test":
                         quarantine = true;
                         selfTest = true;
@@ -174,7 +191,7 @@ namespace LightEpoch.Repro.Common
             }
 
             var pattern = new TPattern();
-            Console.WriteLine($"{pattern.Name} repro  impl={impl}  rounds={rounds:N0}  deref={deref}  pairs={pairs}");
+            Console.WriteLine($"{pattern.Name} repro  impl={impl}  rounds={rounds:N0}  deref={deref}  pairs={pairs}  reclaimerDelay={reclaimerDelay}{(jitter ? " (jittered)" : string.Empty)}");
             Console.WriteLine($"epoch sequence: {pattern.EpochSequence}");
             Console.WriteLine($"OS={RuntimeInformation.OSDescription.Trim()}  Arch={RuntimeInformation.ProcessArchitecture}  {CoreTopology.Describe()}");
             Console.WriteLine(quarantine
@@ -198,7 +215,7 @@ namespace LightEpoch.Repro.Common
 
                 WarnIfSamePhysicalCore(physicalCores, reclaimerCore, readerCore);
                 Console.WriteLine($"pair 0: cores(reclaimer={reclaimerCore},reader={readerCore})");
-                return RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest);
+                return RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest, reclaimerDelay, jitter, disturberCores);
             }
 
             int[] selected;
@@ -216,7 +233,7 @@ namespace LightEpoch.Repro.Common
 
             Console.WriteLine($"core selection: one logical processor per physical core" + (crossNuma ? ", pairs straddle NUMA nodes" : string.Empty) + (seed.HasValue ? $" (shuffled, seed={seed.Value})" : " (in enumeration order)"));
 
-            return RunPairs<TPattern>(impl, rounds, deref, pairs, selected, quarantine, selfTest);
+            return RunPairs<TPattern>(impl, rounds, deref, pairs, selected, quarantine, selfTest, reclaimerDelay, jitter, disturberCores);
         }
 
         private static void WarnIfSamePhysicalCore(IReadOnlyList<CoreTopology.PhysicalCore> physicalCores, int reclaimerCore, int readerCore)
@@ -236,7 +253,7 @@ namespace LightEpoch.Repro.Common
         // reader+reclaimer per pair, each thread on its own physical core. In unmap
         // mode a real fault is an access violation that terminates the whole process;
         // in quarantine mode each pair returns its own verdict, so they are combined.
-        private static int RunPairs<TPattern>(string impl, long rounds, int deref, int pairs, int[] cores, bool quarantine, bool selfTest)
+        private static int RunPairs<TPattern>(string impl, long rounds, int deref, int pairs, int[] cores, bool quarantine, bool selfTest, int reclaimerDelay, bool jitter, int[] disturberCores)
             where TPattern : struct, IReproPattern
         {
             var numaByLogicalProcessor = new Dictionary<int, int>();
@@ -256,7 +273,7 @@ namespace LightEpoch.Repro.Common
                 numaByLogicalProcessor.TryGetValue(reclaimerCore, out int reclaimerNode);
                 numaByLogicalProcessor.TryGetValue(readerCore, out int readerNode);
                 Console.WriteLine($"pair {p}: cores(reclaimer={reclaimerCore}[numa{reclaimerNode}],reader={readerCore}[numa{readerNode}])");
-                var t = new Thread(() => exitCodes[pairIndex] = RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest))
+                var t = new Thread(() => exitCodes[pairIndex] = RunSingle<TPattern>(impl, rounds, deref, readerCore, reclaimerCore, quarantine, selfTest, reclaimerDelay, jitter, disturberCores))
                 {
                     IsBackground = false,
                     Name = $"pair{p}"
@@ -277,23 +294,23 @@ namespace LightEpoch.Repro.Common
             return 0;
         }
 
-        private static int RunSingle<TPattern>(string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest)
+        private static int RunSingle<TPattern>(string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest, int reclaimerDelay, bool jitter, int[] disturberCores)
             where TPattern : struct, IReproPattern
         {
             if (quarantine)
             {
                 return impl switch
                 {
-                    "baseline" => new QuarantineLitmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
-                    "fullbarrier" => new QuarantineLitmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
+                    "baseline" => new QuarantineLitmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, reclaimerDelay, jitter, disturberCores).Run(),
+                    "fullbarrier" => new QuarantineLitmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, reclaimerDelay, jitter, disturberCores).Run(),
                     _ => UnknownImplementation(impl),
                 };
             }
 
             return impl switch
             {
-                "baseline" => new Litmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
-                "fullbarrier" => new Litmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
+                "baseline" => new Litmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter, disturberCores).Run(),
+                "fullbarrier" => new Litmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter, disturberCores).Run(),
                 _ => UnknownImplementation(impl),
             };
         }
@@ -314,6 +331,22 @@ namespace LightEpoch.Repro.Common
         {
             value = 0;
             return TryRead(args, ref index, out string text) && long.TryParse(text, out value);
+        }
+
+        private static int[] ParseCoreList(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text))
+                return Array.Empty<int>();
+
+            var parts = text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var result = new int[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (!int.TryParse(parts[i], out result[i]) || result[i] < 0)
+                    return null;
+            }
+
+            return result;
         }
 
         private static bool TryReadInt(string[] args, ref int index, out int value)
@@ -353,7 +386,8 @@ namespace LightEpoch.Repro.Common
                 "usage: LightEpoch.Repro [--pattern <bare|resume-and-refresh>]\n" +
                 "       --impl <baseline|fullbarrier>\n" +
                 "       [--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa]\n" +
-                "       [--quarantine] [--self-test]\n" +
+                "       [--quarantine] [--self-test] [--reclaimer-delay N] [--jitter]\n" +
+                "       [--disturber-cores a,b,...]\n" +
                 "       [--reader-core N --reclaimer-core N]   (single pair, manual pinning)\n" +
                 "--pattern selects the epoch sequence the reader runs per operation:\n" +
                 "  bare              Resume() -> access -> Suspend()   (isolates the Acquire announce)\n" +
@@ -370,6 +404,22 @@ namespace LightEpoch.Repro.Common
                 "--self-test implies --quarantine and poisons every round, proving the detector\n" +
                 "  can fire. It must report violations; if it does not, no clean --quarantine\n" +
                 "  result means anything.\n" +
+                "--reclaimer-delay spins the reclaimer that many iterations after the round\n" +
+                "  barrier and before the unlink, aligning it with the reader's announce. The\n" +
+                "  reader leaves the barrier and still has to run the slot-reservation CAS in\n" +
+                "  Acquire(), so at delay 0 the unlink lands far too early and the window\n" +
+                "  rarely opens. This shifts only the reclaimer's timing, never the epoch\n" +
+                "  algorithm under test.\n" +
+                "--jitter picks a fresh delay in [0,N] each round, sweeping the alignment space\n" +
+                "  instead of betting on a single offset.\n" +
+                "--disturber-cores <a,b,...> pins one thread per listed logical processor that\n" +
+                "  does nothing but READ the epoch table. Reads cannot change an epoch decision;\n" +
+                "  they keep the table's lines shared instead of exclusively owned by the\n" +
+                "  announcing thread. Acquire() runs a CAS on threadId, which shares a cache\n" +
+                "  line with localCurrentEpoch, so without disturbers that CAS leaves the line\n" +
+                "  owned and the announce retires immediately, closing the window. Under\n" +
+                "  disturbance the announce must win an RFO, and x86 store buffers commit in\n" +
+                "  order, so it stays pending and the race becomes observable.\n" +
                 "The retiring thread always holds an epoch and refreshes it each round, the way\n" +
                 "  Tsavorite drives the epoch in production; BumpCurrentEpoch asserts that.\n" +
                 "exit 0 = survived; nonzero/aborted = fault observed.");

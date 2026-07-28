@@ -15,6 +15,7 @@ namespace LightEpoch.Core
         public void Refresh();
         public void Suspend();
         public void BumpCurrentEpoch(Action onDrain);
+        public long ReadAllEntries();
         public string Name { get; }
     }
 
@@ -26,6 +27,7 @@ namespace LightEpoch.Core
         public void Refresh() => e.ProtectAndDrain();
         public void Suspend() => e.Suspend();
         public void BumpCurrentEpoch(Action onDrain) => e.BumpCurrentEpoch(onDrain);
+        public long ReadAllEntries() => e.ReadAllEntries();
         public string Name => "baseline (LightEpoch, no fence)";
     }
 
@@ -37,6 +39,7 @@ namespace LightEpoch.Core
         public void Refresh() => e.ProtectAndDrain();
         public void Suspend() => e.Suspend();
         public void BumpCurrentEpoch(Action onDrain) => e.BumpCurrentEpoch(onDrain);
+        public long ReadAllEntries() => e.ReadAllEntries();
         public string Name => "full-barrier (FixedLightEpochWithMemoryBarrier)";
     }
 }

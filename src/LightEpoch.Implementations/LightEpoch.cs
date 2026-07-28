@@ -428,6 +428,24 @@ namespace LightEpoch.Core
         }
 
         /// <summary>
+        /// Repro instrumentation. Reads every epoch-table entry and returns their sum.
+        /// Purely read-only, so it cannot influence any epoch decision; it exists so a
+        /// disturber thread can keep the table's cache lines in a shared state rather
+        /// than exclusively owned by the thread that announces into them. An announce
+        /// into a shared line must first win an RFO, and because x86 store buffers
+        /// commit in order that keeps the announce pending long enough for the missing
+        /// StoreLoad fence to be observable.
+        /// </summary>
+        public long ReadAllEntries()
+        {
+            long sum = 0;
+            for (var index = 1; index <= kTableSize; index++)
+                sum += (*(tableAligned + index)).localCurrentEpoch;
+
+            return sum;
+        }
+
+        /// <summary>
         /// Looks at all threads and return the latest safe epoch
         /// </summary>
         /// <param name="currentEpoch">Current epoch</param>
