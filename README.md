@@ -151,12 +151,6 @@ from process start; `SURVIVED` means the run was killed at the cap with no fault
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s |
 
-**Soak** — the `baseline` build relaunched back to back until 50 faults were
-collected, each attempt killed at a cap and counted as a miss if it survived — gives
-faults per attempt: N2 `bare` at 16 threads **50 / 51 — 98 %**; N1
-`resume-and-refresh` at 8 threads 6 / 21 — 29 %, and at 16 threads 14 / 45 — 31 %
-*(still running)*. Caps were 300 s except the last, which used 120 s.
-
 Concurrency is the dominant factor in how fast the window opens: every extra pair is
 another independent chance per unit time for the reclaimer's scan to run before the
 reader's unfenced announce becomes visible. Two results stand out:
@@ -171,9 +165,10 @@ reader's unfenced announce becomes visible. Two results stand out:
   minutes end to end, fastest fault in 1 s. N1 faults on roughly one attempt in
   three, so the same 50 faults cost hours of wall clock.
 
-In every soak the faults are **bursty** rather than evenly spread — long runs of
-misses sit between clusters of quick faults. This is why a single "survived" run is
-weak evidence, and why the repeat count matters more than any one time-to-fault.
+Across these repeated attempts the faults are **bursty** rather than evenly spread —
+long runs of misses sit between clusters of quick faults. This is why a single
+"survived" run is weak evidence, and why the repeat count matters more than any one
+time-to-fault.
 
 `fullbarrier` was run for a full 300 s on each machine under the exact configuration
 that faults the baseline there, and survived every time.
@@ -476,7 +471,7 @@ NoUseAfterFree == ~ (memory.objectFreed /\ readerInCriticalSection)
 
 ### The raw TLC output
 
-This is the counterexample exactly as TLC prints it, unedited:
+This is the counterexample exactly as TLC prints it:
 
 ```
 TLC2 Version 2.19 of 08 August 2024 (rev: 5a47802)
