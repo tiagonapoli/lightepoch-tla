@@ -35,8 +35,9 @@ Epoch-based reclamation rests on one agreement between two threads:
 That is the part the hardware does not give you for free. It requires the reader's
 announce *store* to be globally visible before the reader's first *load* of the
 object — and "store, then load" is exactly the one ordering that **both x86-TSO and
-ARM64 are allowed to reorder**. Preventing it needs an explicit **StoreLoad** fence,
-which is missing in `LightEpoch`.
+ARM64 are allowed to reorder**. Preventing it needs an explicit **StoreLoad** fence
+— which flushes the core's store buffer and ensures later loads happen only after
+the store is globally visible — and that fence is missing in `LightEpoch`.
 
 ### The reader side — announces with a plain store
 
@@ -54,8 +55,7 @@ ReserveEntryForThread(ref entry);
 // >>> MISSING: Interlocked.MemoryBarrier();  <<<
 // Without it this store may sit in THIS core's store buffer while the thread
 // races ahead into the critical section, so other cores keep reading the slot
-// as 0. Store forwarding means the reader reads back the value it just wrote,
-// so it cannot detect its own invisibility.
+// as 0.
 
 // ... caller now dereferences the object it believes it has protected.
 ```
@@ -103,10 +103,8 @@ on Windows, `sys_membarrier` on Linux). Short of that,
 
 The rest of this document establishes that this is not merely theoretical: it
 reproduces on real ARM64 and x86-64 hardware ([Results](#results-reproduced-on-arm64-and-x86-64)),
-TLA+ models run on TLC find the exact interleaving
-([Corner case](#corner-case-the-exact-interleaving-step-by-step)),
-and the same defect is reachable through the API Tsavorite actually uses
-([§8](Draft.md#8-how-tsavorite-actually-uses-lightepoch)).
+and TLA+ models run on TLC find the exact interleaving
+([Corner case](#corner-case-the-exact-interleaving-step-by-step)).
 
 ---
 
@@ -117,8 +115,9 @@ epoch implementation, with the epoch's own
 `BumpCurrentEpoch` → `ComputeNewSafeToReclaimEpoch` → drain logic deciding when to
 free. The harness never frees anything on its own. There are two different patterns of
 using the epoch API, and both are covered: `--pattern bare` (`Resume()` → access →
-`Suspend()`) and `--pattern resume-and-refresh`, which mirrors a Tsavorite
-`BasicContext` operation ([§8](Draft.md#8-how-tsavorite-actually-uses-lightepoch)).
+`Suspend()`) and `--pattern resume-and-refresh` (`Resume()` →
+`InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()`), which mirrors a
+Tsavorite `BasicContext` operation ([§8](Draft.md#8-how-tsavorite-actually-uses-lightepoch)).
 
 ### Hardware under test
 
@@ -126,31 +125,20 @@ using the epoch API, and both are covered: `--pattern bare` (`Resume()` → acce
 |---|---|---|---|---|---|---|
 | Azure `D16ps_v5` | **ARM64** | Ampere Altra | Neoverse-N1 | 16 / 16 | no | 1 |
 | Azure `D16ps_v6` | **ARM64** | Microsoft Cobalt 100 | Neoverse-N2 | 16 / 16 | no | 1 |
-| Azure `D32as_v5` | **x86-64** | AMD EPYC 7763 | Zen 3 | 16 / 32 <sup>a</sup> | yes | 1 |
-| Azure `D64s_v3` | **x86-64** | Intel Xeon Platinum 8171M | Skylake-SP <sup>b</sup> | 32 / 64 | yes | **2** |
+| Azure `D32as_v5` | **x86-64** | AMD EPYC 7763 | Zen 3 | 16 / 32 | yes | 1 |
+| Azure `D64s_v3` | **x86-64** | Intel Xeon Platinum 8171M | Skylake-SP | 32 / 64 | yes | **2** |
 
 Threads are always pinned one per **physical** core; SMT siblings are never paired
 (they share a store buffer, so the race window cannot open at all). On the EPYC 7763
 and Xeon 8171M, SMT siblings are the logical-processor pairs `(2i, 2i+1)`.
 
-<sup>a</sup> The EPYC 7763 is physically a 64-core part; this VM size exposes 16
-cores to the guest. The guest sees a single NUMA node, but core-to-core latency is
-measurably bimodal — ~120 ns among LPs 0–15 and ~530 ns across to LPs 16–31, a 4.4×
-gap consistent with two core complex dies. The layouts below place readers and
-reclaimers on opposite sides of that boundary.
-
-<sup>b</sup> This part is **Skylake-SP, not Cascade Lake** — family 6, model 85,
-stepping 4, and no `avx512_vnni`; Cascade Lake is stepping 5–7.
-
 ### ARM64 — hardware access violation (`0xC0000005`)
 
-Detection is a genuine unmapped-page fault. "Time to fault" is wall-clock from
-process start; `SURVIVED` means the run was killed at the cap with no fault.
-
-A single fault proves the window exists but says nothing about how readily it opens,
-so the configurations of interest were also **soaked**: the `baseline` build was
-relaunched back to back until 50 faults were collected, each attempt killed at a cap
-and counted as a miss if it survived. Those results are below the table.
+The harness allocates and releases whole memory pages under epoch protection: a page
+is unmapped only once the epoch's own drain logic declares it safe to reclaim.
+Detection is therefore a genuine hardware fault — the reader dereferences a page the
+OS has already unmapped — not a software-level check. "Time to fault" is wall-clock
+from process start; `SURVIVED` means the run was killed at the cap with no fault.
 
 | CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) |
 |---|---|---|---|---|
@@ -163,7 +151,9 @@ and counted as a miss if it survived. Those results are below the table.
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s |
 
-Soak results, as faults per attempt: N2 `bare` at 16 threads **50 / 51 — 98 %**; N1
+**Soak** — the `baseline` build relaunched back to back until 50 faults were
+collected, each attempt killed at a cap and counted as a miss if it survived — gives
+faults per attempt: N2 `bare` at 16 threads **50 / 51 — 98 %**; N1
 `resume-and-refresh` at 8 threads 6 / 21 — 29 %, and at 16 threads 14 / 45 — 31 %
 *(still running)*. Caps were 300 s except the last, which used 120 s.
 
