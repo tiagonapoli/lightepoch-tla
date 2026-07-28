@@ -139,11 +139,21 @@ using the epoch API, and both are covered: `--pattern bare` (`Resume()` → acce
 | Azure `D16ps_v6` | **ARM64** | Microsoft Cobalt 100 | Neoverse-N2 | 16 / 16 | no | 1 |
 | local workstation | **x86-64** | Intel i7-12700K | Alder Lake | 12 / 20 | yes (P-cores) | 1 |
 | Azure `D64s_v4` | **x86-64** | Intel Xeon Platinum 8272CL | Cascade Lake | 32 / 64 | yes | **2** |
-| local workstation | **x86-64** | AMD EPYC 7763 | Zen 3 | 16 / 32 | yes | 1 (**2 CCDs**) |
-| Azure `D64s_v3` | **x86-64** | Intel Xeon Platinum 8171M | Skylake-SP | 32 / 64 | yes | **2** |
+| Azure `D32as_v5` | **x86-64** | AMD EPYC 7763 | Zen 3 | 16 / 32 <sup>a</sup> | yes | 1 |
+| Azure `D64s_v3` | **x86-64** | Intel Xeon Platinum 8171M | Skylake-SP <sup>b</sup> | 32 / 64 | yes | **2** |
 
 Threads are always pinned one per **physical** core; SMT siblings are never paired
-(they share a store buffer, so the race window cannot open at all).
+(they share a store buffer, so the race window cannot open at all). On the EPYC 7763
+and Xeon 8171M, SMT siblings are the logical-processor pairs `(2i, 2i+1)`.
+
+<sup>a</sup> The EPYC 7763 is physically a 64-core part; this VM size exposes 16
+cores to the guest. The guest sees a single NUMA node, but core-to-core latency is
+measurably bimodal — ~120 ns among LPs 0–15 and ~530 ns across to LPs 16–31, a 4.4×
+gap consistent with two core complex dies. The layouts below place readers and
+reclaimers on opposite sides of that boundary.
+
+<sup>b</sup> This part is **Skylake-SP, not Cascade Lake** — family 6, model 85,
+stepping 4, and no `avx512_vnni`; Cascade Lake is stepping 5–7.
 
 ### ARM64 — hardware access violation (`0xC0000005`)
 
@@ -268,9 +278,9 @@ Two placement rules matter, and both are easy to get wrong:
 * **Disturber count is a resonance, not a monotonic knob.** On the EPYC, 4 disturbers
   gave 0 violations, 8 gave 27, and 10 gave 4,515; 12 dropped back to 2.
 
-With 10 disturbers per pair on distinct physical cores (28 of 32 LPs used on the
-EPYC, 3 cross-socket pairs on the Xeon), and readers and reclaimers placed across the
-CCD or socket boundary where core-to-core latency is highest:
+With up to 10 disturbers per pair on distinct physical cores (2 pairs on the EPYC, 3
+cross-socket pairs on the Xeon), and readers and reclaimers placed across the
+highest-latency boundary on each machine:
 
 | CPU | Pattern | Impl | Violations | Rounds | Exec time | Violations / 1M rounds |
 |---|---|---|---|---|---|---|
@@ -278,11 +288,30 @@ CCD or socket boundary where core-to-core latency is highest:
 | EPYC 7763 | `bare` | `fullbarrier` | 0 | 50,000,000 | 165 s | 0 |
 | EPYC 7763 | `resume-and-refresh` | `baseline` | **1,004** | 50,000,000 | 159 s | **20.1** |
 | EPYC 7763 | `resume-and-refresh` | `fullbarrier` | 0 | 50,000,000 | 158 s | 0 |
-| Xeon 8171M (**2 nodes**) | `bare` | `baseline` | **648** | 45,000,000 | ~174 s <sup>†</sup> | **14.4** |
-| Xeon 8171M (**2 nodes**) | `bare` | `fullbarrier` | 0 | 45,000,000 | ~174 s <sup>†</sup> | 0 |
-| Xeon 8171M (**2 nodes**) | `resume-and-refresh` | `baseline` | **665** | 60,000,000 | ~165 s <sup>†</sup> | **11.1** |
-| Xeon 8171M (**2 nodes**) | `resume-and-refresh` | `fullbarrier` | 0 | 60,000,000 | ~165 s <sup>†</sup> | 0 |
+| Xeon 8171M | `bare` | `baseline` | **648** | 45,000,000 | ~174 s <sup>†</sup> | **14.4** |
+| Xeon 8171M | `bare` | `fullbarrier` | 0 | 45,000,000 | ~174 s <sup>†</sup> | 0 |
+| Xeon 8171M | `resume-and-refresh` | `baseline` | **665** | 60,000,000 | ~165 s <sup>†</sup> | **11.1** |
+| Xeon 8171M | `resume-and-refresh` | `fullbarrier` | 0 | 60,000,000 | ~165 s <sup>†</sup> | 0 |
 | | | **total** | **3,739 / 0** | 410,000,000 | ~22 min | |
+
+Exact thread placement, since the result depends on it (24 of 32 LPs on the EPYC, 32
+of 64 on the Xeon):
+
+```
+EPYC 7763   readers and reclaimers straddle the LP 0-15 / LP 16-31 latency boundary
+  pair A    reclaimer LP 0   reader LP 16   disturbers 2,4,6,8,10,18,20,22,24,26
+  pair B    reclaimer LP 12  reader LP 28   disturbers 3,5,7,9,11,19,21,23,25,27
+
+Xeon 8171M  socket 0 = LP 0-31, socket 1 = LP 32-63, so every pair straddles sockets
+  pair 0    reclaimer LP 0   reader LP 32   disturbers 2,4,6,8,10,34,36,38,40,42
+  pair 1    reclaimer LP 12  reader LP 44   disturbers 14,16,18,20,22,46,48,50,52,54
+  pair 2    reclaimer LP 24  reader LP 56   disturbers 26,28,30,58,60,62
+```
+
+Each pair's reader and reclaimer sit on separate physical cores on opposite sides of
+the highest-latency boundary, and every disturber gets its own physical core. The two
+EPYC pairs interleave by taking opposite SMT siblings of the same physical cores —
+they read different epoch tables, so both still generate coherence traffic.
 
 `Rounds` is rounds-per-pair × pairs × waves, counted separately for each impl (EPYC 2
 pairs, Xeon 3 pairs, 5,000,000 rounds per pair per wave). Compare rows using the
