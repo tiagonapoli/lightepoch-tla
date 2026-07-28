@@ -139,6 +139,8 @@ using the epoch API, and both are covered: `--pattern bare` (`Resume()` → acce
 | Azure `D16ps_v6` | **ARM64** | Microsoft Cobalt 100 | Neoverse-N2 | 16 / 16 | no | 1 |
 | local workstation | **x86-64** | Intel i7-12700K | Alder Lake | 12 / 20 | yes (P-cores) | 1 |
 | Azure `D64s_v4` | **x86-64** | Intel Xeon Platinum 8272CL | Cascade Lake | 32 / 64 | yes | **2** |
+| local workstation | **x86-64** | AMD EPYC 7763 | Zen 3 | 16 / 32 | yes | 1 (**2 CCDs**) |
+| Azure `D64s_v3` | **x86-64** | Intel Xeon Platinum 8171M | Skylake-SP | 32 / 64 | yes | **2** |
 
 Threads are always pinned one per **physical** core; SMT siblings are never paired
 (they share a store buffer, so the race window cannot open at all).
@@ -229,6 +231,85 @@ anything. Counts below are use-after-free **reads** observed:
 | Xeon 8272CL (**2 nodes**) | `bare` | pairs straddle nodes | `fullbarrier` | 0 / 30 | 0 |
 | Xeon 8272CL (**2 nodes**) | `bare` | single node | `fullbarrier` | 0 / 30 | 0 |
 
+### x86-64 — widening the window with read-only disturbers
+
+The counts above are small — single-digit to low-tens of violations per run — and the
+historical base rate was roughly one violation per 2.4 billion pair-rounds. That is
+not merely bad luck; the window is **structurally** narrow on x86, for a reason
+visible in the implementation:
+
+`Acquire()` reaches the announce via `TryAcquireEntry()`, which does an
+`Interlocked.CompareExchange` on `Entry.threadId` at `[FieldOffset(8)]`.
+`localCurrentEpoch` sits at `[FieldOffset(0)]` — the **same 64-byte cache line**.
+That `lock cmpxchg` is both a full fence and an RFO, so by the time the announce
+store executes a few lines later, the line is already held exclusive and the store
+retires from the store buffer almost immediately. The reclaimer never gets a chance
+to scan in between.
+
+Simply delaying the reclaimer does not help: it drives the "reader observed a stale
+`curPage`" rate from 3 % to 100 % while leaving violations at zero, because delaying
+the unlink delays the scan by the same amount. The two required conditions are
+anti-correlated.
+
+What does work is adding **read-only disturber threads** that do nothing but read the
+epoch table. Reads cannot change any epoch decision, so this is semantically inert
+and cannot manufacture a false positive — but it keeps the announce line in shared
+state, forcing the announce to win an RFO before it can commit. Because x86 store
+buffers drain in order, the announce stays pending long enough for the missing
+StoreLoad fence to become observable. This is standard litmus-test methodology: the
+implementation under test is untouched, and only cache-line state and timing are
+perturbed.
+
+Two placement rules matter, and both are easy to get wrong:
+
+* **Disturbers must sit on distinct physical cores.** Packing them onto SMT siblings
+  collapsed violations from thousands to **zero** — siblings share L1, so their reads
+  generate no coherence traffic at all.
+* **Disturber count is a resonance, not a monotonic knob.** On the EPYC, 4 disturbers
+  gave 0 violations, 8 gave 27, and 10 gave 4,515; 12 dropped back to 2.
+
+With 10 disturbers per pair on distinct physical cores (28 of 32 LPs used on the
+EPYC, 3 cross-socket pairs on the Xeon), and readers and reclaimers placed across the
+CCD or socket boundary where core-to-core latency is highest:
+
+| CPU | Pattern | Impl | Violations | Rounds | Exec time | Violations / 1M rounds |
+|---|---|---|---|---|---|---|
+| EPYC 7763 | `bare` | `baseline` | **1,422** | 50,000,000 | 196 s | **28.4** |
+| EPYC 7763 | `bare` | `fullbarrier` | 0 | 50,000,000 | 165 s | 0 |
+| EPYC 7763 | `resume-and-refresh` | `baseline` | **1,004** | 50,000,000 | 159 s | **20.1** |
+| EPYC 7763 | `resume-and-refresh` | `fullbarrier` | 0 | 50,000,000 | 158 s | 0 |
+| Xeon 8171M (**2 nodes**) | `bare` | `baseline` | **648** | 45,000,000 | ~174 s <sup>†</sup> | **14.4** |
+| Xeon 8171M (**2 nodes**) | `bare` | `fullbarrier` | 0 | 45,000,000 | ~174 s <sup>†</sup> | 0 |
+| Xeon 8171M (**2 nodes**) | `resume-and-refresh` | `baseline` | **665** | 60,000,000 | ~165 s <sup>†</sup> | **11.1** |
+| Xeon 8171M (**2 nodes**) | `resume-and-refresh` | `fullbarrier` | 0 | 60,000,000 | ~165 s <sup>†</sup> | 0 |
+| | | **total** | **3,739 / 0** | 410,000,000 | ~22 min | |
+
+`Rounds` is rounds-per-pair × pairs × waves, counted separately for each impl (EPYC 2
+pairs, Xeon 3 pairs, 5,000,000 rounds per pair per wave). Compare rows using the
+last column; raw totals depend on how many waves fit the time budget.
+
+<sup>†</sup> The Xeon per-impl times are **derived, not measured** — only per-pattern
+wall clock was recorded there, split evenly between the two impls. The measured
+per-pattern totals are 348 s (`bare`) and 331 s (`resume-and-refresh`).
+
+This raises the hit rate by more than four orders of magnitude, and the violations
+are **sustained rather than front-loaded**: all 17 baseline waves produced violations
+(weakest 60, strongest 603), and a per-run decile histogram is flat in every wave on
+both machines — for example `[74 61 53 70 58 59 42 71 61 54]` on the EPYC and
+`[11 13 10 7 14 8 11 14 14 12]` on the Xeon. Several trend upward toward the end, so
+this is not a warm-up or first-touch artifact.
+
+The control is what makes the result meaningful: `fullbarrier` recorded **0
+violations across 13.7 million sampled race-window rounds**, while consistently
+*entering* the window more often than the baseline did — on the Xeon, 2,104,411
+sampled rounds versus the baseline's 1,400,545. The fenced build visits the dangerous
+interleaving more frequently and still never corrupts, which isolates the missing
+fence rather than any property of the harness.
+
+One caveat on reading these numbers: which pattern reproduces *better* is not stable.
+An earlier run of the same configuration had `resume-and-refresh` ahead of `bare` by
+2.4× on the EPYC; here the order reverses. Treat the pattern gap as run-to-run noise.
+
 ### What this establishes
 
 * The unfenced announce is **incorrect on both architectures**, matching the TLA+
@@ -240,7 +321,9 @@ anything. Counts below are use-after-free **reads** observed:
   clean across all x86-64 quarantine runs. The buggy build failed on both
   architectures under exactly the same conditions.
 * **The failure is repeatable, not a one-off.** 50 independent faults were collected
-  back to back on Neoverse-N2, at a 98 % hit rate.
+  back to back on Neoverse-N2, at a 98 % hit rate. On x86-64, read-only disturbers
+  make the window wide enough to produce 3,739 violations across two vendors in about
+  22 minutes, spread evenly through every run, against 0 for the fenced build.
 * **How easily it reproduces varies enormously by microarchitecture and workload
   shape.** Neoverse-N2 faults under the minimal `bare` sequence within seconds, and
   under `resume-and-refresh` too. Neoverse-N1 produced no fault at 4 physical cores
@@ -361,11 +444,19 @@ dotnet LightEpoch.Repro.dll --impl baseline --pairs 8 --rounds 8000000 --quarant
 
 # Detector self-test - MUST report violations, otherwise --quarantine results are meaningless
 dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 1 --rounds 200000 --self-test
+
+# x86-64 with read-only disturbers - the high-yield configuration used for the table
+# above. --disturber-cores must list DISTINCT physical cores; SMT siblings share L1
+# and produce no coherence traffic, which silently drops the yield to zero.
+dotnet LightEpoch.Repro.dll --impl baseline --pairs 1 --rounds 5000000 --quarantine `
+    --reclaimer-core 0 --reader-core 16 --disturber-cores 2,4,6,8,10,18,20,22,24,26
 ```
 
-x86 violations are rare, so run the buggy build several times (the counts above are
-totals over 30–40 pair-runs) and always compare against a fixed build over the same
-number of runs.
+x86 violations are rare without disturbers, so run the buggy build several times (the
+counts in the first x86-64 table are totals over 30–40 pair-runs) and always compare
+against a fixed build over the same number of runs. With disturbers the rate is high
+enough that a single run is informative, but the `fullbarrier` control should still be
+run for the same duration.
 
 ---
 
