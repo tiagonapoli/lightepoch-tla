@@ -1,0 +1,9 @@
+<Project>
+
+  <PropertyGroup>
+    <!-- Applies the IDE0040 accessibility rule from .editorconfig at build time,
+         not only in the IDE. -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,10 @@
+root = true
+
+[*.cs]
+dotnet_style_require_accessibility_modifiers = always:warning
+dotnet_diagnostic.IDE0040.severity = warning
+
+# Near-verbatim copies of the epoch implementation under study. They are kept
+# diffable against upstream, so style rules that would rewrite them are off.
+[src/LightEpoch.Implementations/{LightEpoch,FixedLightEpochWithMemoryBarrier,FixedLightEpochWithInterlockedExchange,FixedLightEpochAsymmetricBarrier}.cs]
+dotnet_diagnostic.IDE0040.severity = none

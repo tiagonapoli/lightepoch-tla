@@ -1,0 +1,19 @@
+## .NET build outputs
+bin/
+obj/
+
+## BenchmarkDotNet artifacts
+BenchmarkDotNet.Artifacts/
+
+## TLC model-checker scratch output
+tla/states/
+tla/**/states/
+
+## IDE
+.vs/
+.idea/
+*.user
+
+## OS
+.DS_Store
+Thumbs.db
