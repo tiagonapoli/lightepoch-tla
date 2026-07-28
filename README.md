@@ -118,8 +118,6 @@ long runs of misses sit between clusters of quick faults — which is why a sing
 `fullbarrier` was run for a full 300 s on each machine under the exact configuration
 that faults the baseline there, and survived every time.
 
-Full per-attempt data is in **[SoakResults.md](SoakResults.md)**.
-
 ### x86-64 — logical use-after-free detection
 
 x86 needs a different detection mechanism, because the memory unmap used on ARM64
