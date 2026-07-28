@@ -25,6 +25,97 @@ The bug is demonstrated in two complementary ways:
 
 ---
 
+## Overview: where the barrier is missing
+
+Epoch-based reclamation rests on one agreement between two threads:
+
+> A reader **announces** its epoch before touching anything. A reclaimer **scans**
+> every announced epoch before freeing anything. If the reader announced before the
+> reclaimer scanned, the reclaimer must see it.
+
+That last sentence is the part the hardware does not give you for free. It requires
+the reader's announce *store* to be globally visible before the reader's first
+*load* of the object — and "store, then load" is exactly the one ordering that
+**both x86-TSO and ARM64 are allowed to reorder**. Preventing it needs an explicit
+**StoreLoad** fence. `LightEpoch` has none.
+
+### The reader side — announces with a plain store
+
+```cs
+// LightEpoch.cs:545  --  Acquire()
+// (ProtectAndDrain() at :304 has the identical unfenced announce.)
+
+// Reserve an entry in the epoch table for this thread
+ReserveEntryForThread(ref entry);          // CAS -- a full barrier, but it happens
+                                           // BEFORE the announce, so it orders nothing
+                                           // between the announce and the load below.
+
+// Protect CurrentEpoch by copying it to the instance-specific epoch table
+// so that ComputeNewSafeToReclaimEpoch() will see it.
+(*(tableAligned + entry)).localCurrentEpoch = CurrentEpoch;
+
+// >>> MISSING: Interlocked.MemoryBarrier();  <<<
+// Without it this plain store may sit in THIS core's store buffer while the
+// thread races ahead into the critical section. `localCurrentEpoch` is a plain
+// `public long` field at [FieldOffset(0)] -- not volatile, written through a raw
+// pointer -- so nothing forces it out. Store forwarding means the reader still
+// reads `1` back from its own slot, so it cannot detect its own invisibility.
+
+// ... caller now dereferences the object it believes it has protected.
+```
+
+### The reclaimer side — scans, and treats "not yet visible" as "not there"
+
+```cs
+// LightEpoch.cs:453  --  ComputeNewSafeToReclaimEpoch()
+
+long ComputeNewSafeToReclaimEpoch(long currentEpoch)
+{
+    var oldestOngoingCall = currentEpoch;
+
+    for (var index = 1; index <= kTableSize; index++)
+    {
+        var entry_epoch = (*(tableAligned + index)).localCurrentEpoch;
+
+        // >>> THE FATAL AMBIGUITY <<<
+        // 0 means "this slot is free". A slot whose announce is still buffered on
+        // another core ALSO reads 0. The scan cannot tell the two apart, so a live
+        // reader is silently skipped and does not hold the safe epoch back.
+        if (0 != entry_epoch)
+        {
+            if (entry_epoch < oldestOngoingCall)
+                oldestOngoingCall = entry_epoch;
+        }
+    }
+
+    // With the live reader skipped, this advances past the epoch the object was
+    // retired in -- and the object is freed while the reader is inside it.
+    SafeToReclaimEpoch = oldestOngoingCall - 1;
+    return SafeToReclaimEpoch;
+}
+```
+
+Note that a fence *here* cannot help. A barrier only drains the buffer of the core
+that executes it; the reclaimer has no way to reach into the reader's store buffer.
+**The fix must be on the reader's core**, between the announce and the first load.
+
+### Why the obvious candidates don't close it
+
+| Candidate | Why it fails |
+| --- | --- |
+| Mark `localCurrentEpoch` as `volatile` | A volatile write is a *release* store. On x86 plain stores are already release. Release orders StoreStore and LoadLoad — **not StoreLoad**. |
+| The `Interlocked.CompareExchange` in `TryAcquireEntry` (`:589`) | A real full barrier, but it runs *before* the announce. Fencing before a store says nothing about that store versus a later load. |
+| `Interlocked.Increment(ref CurrentEpoch)` in `BumpCurrentEpoch` (`:365`) | A real full barrier — on the **reclaimer's** core. Barriers are local. |
+| `drainCount` being `volatile int` (`:135`) | A volatile *read* is acquire. Acquire orders later loads, not an earlier store. |
+
+The rest of this document establishes that this is not merely theoretical: it
+reproduces on real ARM64 and x86-64 hardware ([Results](#results-reproduced-on-arm64-and-x86-64)),
+TLC finds the exact interleaving ([Corner case](#corner-case-the-exact-interleaving-step-by-step)),
+and the same defect is reachable through the API Tsavorite actually uses
+([§8](Draft.md#8-how-tsavorite-actually-uses-lightepoch)).
+
+---
+
 ## Results: reproduced on ARM64 and x86-64
 
 Every number below is from real hardware (Azure VMs and a local workstation),
@@ -458,7 +549,7 @@ storeBuffer = [Reader |-> <<>>, Reclaimer |-> <<>>]
 
 The reader reads `CurrentEpoch` (= 1) and writes it into its slot. That write is a
 **plain store**, so it goes into the reader's queue, not to memory
-([`LightEpoch.cs:527`](src/LightEpoch.Implementations/LightEpoch.cs#L527)).
+([`LightEpoch.cs:545`](src/LightEpoch.Implementations/LightEpoch.cs#L545)).
 
 ```
 storeBuffer = [Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>, Reclaimer |-> <<>>]   ← queued, private to Reader
@@ -524,7 +615,7 @@ reader can see.
 **Step 5 — `ComputeNewSafeToReclaimEpoch`: the reclaimer scans the slots and frees the object.**
 
 `ComputeNewSafeToReclaimEpoch`
-([`LightEpoch.cs:435`](src/LightEpoch.Implementations/LightEpoch.cs#L435)) walks every
+([`LightEpoch.cs:453`](src/LightEpoch.Implementations/LightEpoch.cs#L453)) walks every
 thread's slot looking for the oldest active epoch, skipping slots that read `0`:
 
 ```csharp
@@ -603,7 +694,7 @@ by the time the reclaimer scans in step 5 the slot reads `1`, the scan computes
 `LightEpoch.tla` models the bare enter path. Tsavorite does not call it that way — it
 runs `Resume()` → `ProtectAndDrain()` → operation → `Suspend()` per operation, which
 announces at **two** sites
-([`LightEpoch.cs:527`](src/LightEpoch.Implementations/LightEpoch.cs#L527) and
+([`LightEpoch.cs:545`](src/LightEpoch.Implementations/LightEpoch.cs#L545) and
 [`:304`](src/LightEpoch.Implementations/LightEpoch.cs#L304)), both unfenced.
 `LightEpochResumeAndRefresh.tla` models that exact sequence and is **also VIOLATED**,
 which is what carries the result from "a bug in the abstract algorithm" to "a bug
