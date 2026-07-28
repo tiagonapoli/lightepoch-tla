@@ -1,31 +1,34 @@
 --------------------------- MODULE LightEpochResumeAndRefresh ---------------------------
 (***************************************************************************)
-(* LightEpochResumeAndRefresh — the BUGGY baseline, modeled through the exact call *)
-(* sequence Tsavorite's default API (BasicContext) uses per operation.       *)
+(* LightEpochResumeAndRefresh — the BUGGY baseline, modelled through the    *)
+(* exact call sequence Tsavorite's default API (BasicContext) uses per      *)
+(* operation.                                                              *)
 (*                                                                         *)
 (* A BasicContext Read/Upsert/RMW wraps every operation in                  *)
-(*   UnsafeResumeThread()  = epoch.Resume()  (Acquire: slot CAS + announce) *)
-(*                           + InternalRefresh() -> ProtectAndDrain()        *)
-(*                             (a SECOND announce + drain)                   *)
+(*   UnsafeResumeThread()  = epoch.Resume() (Acquire: slot CAS + announce)  *)
+(*                           + InternalRefresh() -> ProtectAndDrain()       *)
+(*                             (a SECOND announce + drain)                  *)
 (*   ... the operation ...                                                  *)
-(*   UnsafeSuspendThread() = epoch.Suspend() (Release: reset lce -> 0).      *)
+(*   UnsafeSuspendThread() = epoch.Suspend() (Release: slot back to 0).     *)
 (*                                                                         *)
 (* So a single operation issues TWO announce stores before the operation's  *)
 (* shared-data load, and the following Release resets the slot to 0 —       *)
-(* which is why the *next* operation re-opens the 0 -> E "absent reader"     *)
-(* window all over again. Neither announce carries a StoreLoad fence in the  *)
-(* baseline, so both can sit in the reader's store buffer (mem.lce == 0,     *)
-(* "thread absent") when the reclaimer's scan reads the slot.                *)
+(* which is why the *next* operation re-opens the 0 -> E "absent reader"    *)
+(* window all over again. Neither announce carries a StoreLoad fence in the *)
+(* baseline, so both can sit in the reader's store buffer, leaving          *)
+(* memory.localCurrentEpoch at 0 ("thread absent") when the reclaimer's     *)
+(* scan reads the slot.                                                    *)
 (*                                                                         *)
 (* This is the same defect as MODULE LightEpoch, but proved against the     *)
 (* real per-operation API shape rather than a single bare announce.         *)
 (*                                                                         *)
 (* The reclaimer is PROTECTED, exactly as in Tsavorite: BumpCurrentEpoch    *)
 (* asserts ThisInstanceProtected(), so the retiring thread owns an epoch    *)
-(* slot (mem.lceRc) and refreshes it every round. That slot participates in *)
-(* the ComputeNewSafeToReclaimEpoch min-scan and therefore clamps the safe  *)
-(* epoch. Modeling the reclaimer as unprotected would leave it out of the   *)
-(* scan and widen the window past anything real code can produce.          *)
+(* slot (memory.reclaimerLocalCurrentEpoch) and refreshes it every round.   *)
+(* That slot participates in the ComputeNewSafeToReclaimEpoch min-scan and  *)
+(* therefore clamps the safe epoch. Modelling the reclaimer as unprotected  *)
+(* would leave it out of the scan and widen the window past anything real   *)
+(* code can produce.                                                       *)
 (*                                                                         *)
 (* Expected: NoUseAfterFree is VIOLATED.                                   *)
 (***************************************************************************)
@@ -33,131 +36,135 @@ EXTENDS Naturals, Sequences
 
 CONSTANT Model          \* "tso" | "arm" — see MODULE StoreBuffer
 
-Rd == "Rd"
-Rc == "Rc"
-Procs == {Rd, Rc}
+Reader == "Reader"
+Reclaimer == "Reclaimer"
+Threads == {Reader, Reclaimer}
 
-VARIABLES mem, sb, holds, eRead, gRetire, pcRd, pcRc
-vars == <<mem, sb, holds, eRead, gRetire, pcRd, pcRc>>
+VARIABLES memory, storeBuffer, readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, readerPc, reclaimerPc
+vars == <<memory, storeBuffer, readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, readerPc, reclaimerPc>>
 
 SB == INSTANCE StoreBuffer
 Load(p, f) == SB!Load(p, f)
 Min(a, b)  == SB!Min(a, b)
 
 Init ==
-    /\ mem = [ ce |-> 1, lce |-> 0, lceRc |-> 0, ret |-> FALSE, freed |-> FALSE ]
-    /\ sb = [ p \in Procs |-> <<>> ]
-    /\ holds = FALSE
-    /\ eRead = 0
-    /\ gRetire = 0
-    /\ pcRd = "acq"
-    /\ pcRc = "acqRc"
+    /\ memory = [ currentEpoch |-> 1, localCurrentEpoch |-> 0, reclaimerLocalCurrentEpoch |-> 0, objectUnlinked |-> FALSE, objectFreed |-> FALSE ]
+    /\ storeBuffer = [ p \in Threads |-> <<>> ]
+    /\ readerInCriticalSection = FALSE
+    /\ readerAnnouncedEpoch = 0
+    /\ triggerEpoch = 0
+    /\ readerPc = "Acquire"
+    /\ reclaimerPc = "AcquireReclaimer"
 
 \* Asynchronous store-buffer drain: one buffered write becomes visible.
 FlushOne(p) ==
     /\ SB!FlushOne(p)
-    /\ UNCHANGED <<holds, eRead, gRetire, pcRd, pcRc>>
+    /\ UNCHANGED <<readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, readerPc, reclaimerPc>>
 
 \* Reader ---------------------------------------------------------------------
-\* Resume()/Acquire announce (LightEpoch.cs ~527): PLAIN store -> buffered.
-Acq ==
-    /\ pcRd = "acq"
-    /\ eRead' = Load(Rd, "ce")
-    /\ sb' = SB!Buffer(Rd, "lce", eRead')
-    /\ pcRd' = "refresh"
-    /\ UNCHANGED <<mem, holds, gRetire, pcRc>>
+\* Resume() -> Acquire announce (LightEpoch.cs:527): PLAIN store -> buffered.
+Acquire ==
+    /\ readerPc = "Acquire"
+    /\ readerAnnouncedEpoch' = Load(Reader, "currentEpoch")
+    /\ storeBuffer' = SB!Buffer(Reader, "localCurrentEpoch", readerAnnouncedEpoch')
+    /\ readerPc' = "ProtectAndDrain"
+    /\ UNCHANGED <<memory, readerInCriticalSection, triggerEpoch, reclaimerPc>>
 
-\* InternalRefresh() -> ProtectAndDrain announce (LightEpoch.cs ~304): a SECOND
+\* InternalRefresh() -> ProtectAndDrain announce (LightEpoch.cs:304): a SECOND
 \* PLAIN announce store, still no StoreLoad fence in the baseline.
-Refresh ==
-    /\ pcRd = "refresh"
-    /\ sb' = SB!Buffer(Rd, "lce", Load(Rd, "ce"))
-    /\ pcRd' = "cap"
-    /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRc>>
+ProtectAndDrain ==
+    /\ readerPc = "ProtectAndDrain"
+    /\ storeBuffer' = SB!Buffer(Reader, "localCurrentEpoch", Load(Reader, "currentEpoch"))
+    /\ readerPc' = "ReadObject"
+    /\ UNCHANGED <<memory, readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, reclaimerPc>>
 
-\* The operation loads the object-linked flag; if it still looks linked, hold it.
-Cap ==
-    /\ pcRd = "cap"
-    /\ holds' = (~ Load(Rd, "ret"))
-    /\ pcRd' = "use"
-    /\ UNCHANGED <<mem, sb, eRead, gRetire, pcRc>>
+\* The operation loads the object-linked flag; if it still looks linked, the
+\* reader enters its critical section and dereferences the object.
+ReadObject ==
+    /\ readerPc = "ReadObject"
+    /\ readerInCriticalSection' = (~ Load(Reader, "objectUnlinked"))
+    /\ readerPc' = "Dereference"
+    /\ UNCHANGED <<memory, storeBuffer, readerAnnouncedEpoch, triggerEpoch, reclaimerPc>>
 
-Use ==
-    /\ pcRd = "use"
-    /\ holds' = FALSE
-    /\ pcRd' = "rel"
-    /\ UNCHANGED <<mem, sb, eRead, gRetire, pcRc>>
+Dereference ==
+    /\ readerPc = "Dereference"
+    /\ readerInCriticalSection' = FALSE
+    /\ readerPc' = "Release"
+    /\ UNCHANGED <<memory, storeBuffer, readerAnnouncedEpoch, triggerEpoch, reclaimerPc>>
 
 \* Suspend()/Release: reset the slot to 0 ("absent"), re-opening the window
 \* for a subsequent operation.
-Rel ==
-    /\ pcRd = "rel"
-    /\ sb' = SB!Buffer(Rd, "lce", 0)
-    /\ pcRd' = "done"
-    /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRc>>
+Release ==
+    /\ readerPc = "Release"
+    /\ storeBuffer' = SB!Buffer(Reader, "localCurrentEpoch", 0)
+    /\ readerPc' = "Done"
+    /\ UNCHANGED <<memory, readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, reclaimerPc>>
 
 \* Reclaimer ------------------------------------------------------------------
-\* Resume()/Acquire on the reclaimer itself: BumpCurrentEpoch asserts
+\* Resume() -> Acquire on the reclaimer itself: BumpCurrentEpoch asserts
 \* ThisInstanceProtected(), so the retiring thread holds its own epoch slot.
 \* Same plain announce store as the reader's, so it buffers too.
-AcqRc ==
-    /\ pcRc = "acqRc"
-    /\ sb' = SB!Buffer(Rc, "lceRc", Load(Rc, "ce"))
-    /\ pcRc' = "retire"
-    /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRd>>
+AcquireReclaimer ==
+    /\ reclaimerPc = "AcquireReclaimer"
+    /\ storeBuffer' = SB!Buffer(Reclaimer, "reclaimerLocalCurrentEpoch", Load(Reclaimer, "currentEpoch"))
+    /\ reclaimerPc' = "Unlink"
+    /\ UNCHANGED <<memory, readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, readerPc>>
 
-Retire ==
-    /\ pcRc = "retire"
-    /\ sb' = SB!Buffer(Rc, "ret", TRUE)
-    /\ pcRc' = "bump"
-    /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRd>>
+Unlink ==
+    /\ reclaimerPc = "Unlink"
+    /\ storeBuffer' = SB!Buffer(Reclaimer, "objectUnlinked", TRUE)
+    /\ reclaimerPc' = "BumpCurrentEpoch"
+    /\ UNCHANGED <<memory, readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, readerPc>>
 
-\* Interlocked.Increment(CurrentEpoch): a full RMW -> drains Rc's store buffer.
-Bump ==
-    /\ pcRc = "bump"
-    /\ LET m1 == SB!Fenced(Rc)
-       IN /\ mem' = [m1 EXCEPT !.ce = m1.ce + 1]
-          /\ gRetire' = m1.ce
-    /\ sb' = SB!Drained(Rc)
-    /\ pcRc' = "refreshRc"
-    /\ UNCHANGED <<holds, eRead, pcRd>>
+\* Interlocked.Increment(CurrentEpoch) (LightEpoch.cs:365): a full RMW, so it
+\* drains the reclaimer's own store buffer.
+BumpCurrentEpoch ==
+    /\ reclaimerPc = "BumpCurrentEpoch"
+    /\ LET fencedMemory == SB!Fenced(Reclaimer)
+       IN /\ memory' = [fencedMemory EXCEPT !.currentEpoch = fencedMemory.currentEpoch + 1]
+          /\ triggerEpoch' = fencedMemory.currentEpoch
+    /\ storeBuffer' = SB!Drained(Reclaimer)
+    /\ reclaimerPc' = "ProtectAndDrainReclaimer"
+    /\ UNCHANGED <<readerInCriticalSection, readerAnnouncedEpoch, readerPc>>
 
-\* Refresh() -> ProtectAndDrain on the reclaimer: re-announce its own slot at
-\* the new CurrentEpoch before scanning. Plain store, so it may still be
-\* buffered when the scan below reads it back (store forwarding applies).
-RefreshRc ==
-    /\ pcRc = "refreshRc"
-    /\ sb' = SB!Buffer(Rc, "lceRc", Load(Rc, "ce"))
-    /\ pcRc' = "compute"
-    /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRd>>
+\* InternalRefresh() -> ProtectAndDrain on the reclaimer: re-announce its own
+\* slot at the new CurrentEpoch before scanning. Plain store, so it may still
+\* be buffered when the scan below reads it back (store forwarding applies).
+ProtectAndDrainReclaimer ==
+    /\ reclaimerPc = "ProtectAndDrainReclaimer"
+    /\ storeBuffer' = SB!Buffer(Reclaimer, "reclaimerLocalCurrentEpoch", Load(Reclaimer, "currentEpoch"))
+    /\ reclaimerPc' = "ComputeNewSafeToReclaimEpoch"
+    /\ UNCHANGED <<memory, readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, readerPc>>
 
-\* ComputeNewSafeToReclaimEpoch scan (LightEpoch.cs):
-\*   oldest = CurrentEpoch; for each entry: if (e != 0 && e < oldest) oldest = e;
-\*   SafeToReclaimEpoch = oldest - 1;
-\* The reader's slot is read from memory (remote core, may still be 0 if its
+\* ComputeNewSafeToReclaimEpoch (LightEpoch.cs:435):
+\*   oldestOngoingCall = CurrentEpoch;
+\*   for each entry: if (e != 0 && e < oldestOngoingCall) oldestOngoingCall = e;
+\*   SafeToReclaimEpoch = oldestOngoingCall - 1;
+\* The reader's slot is read from memory (a remote core, so still 0 while its
 \* announce is buffered); the reclaimer reads its OWN slot with store
 \* forwarding. The reclaimer's entry clamps the min but does not close the
-\* window: after Bump the reclaimer sits at ce, so safe still covers gRetire.
-Compute ==
-    /\ pcRc = "compute"
-    /\ LET ceVal  == mem.ce
-           rdVal  == mem.lce
-           rcVal  == Load(Rc, "lceRc")
-           o1     == IF rdVal > 0 THEN Min(ceVal, rdVal) ELSE ceVal
-           oldest == IF rcVal > 0 THEN Min(o1, rcVal) ELSE o1
-           safe   == oldest - 1
-       IN IF gRetire <= safe
-          THEN /\ mem' = [mem EXCEPT !.freed = TRUE]
-               /\ pcRc' = "done"
-          ELSE /\ UNCHANGED <<mem, pcRc>>
-    /\ UNCHANGED <<sb, holds, eRead, gRetire, pcRd>>
+\* window: after the bump the reclaimer sits at the new CurrentEpoch, so the
+\* safe epoch still covers triggerEpoch.
+ComputeNewSafeToReclaimEpoch ==
+    /\ reclaimerPc = "ComputeNewSafeToReclaimEpoch"
+    /\ LET currentEpochValue  == memory.currentEpoch
+           readerSlot         == memory.localCurrentEpoch
+           reclaimerSlot      == Load(Reclaimer, "reclaimerLocalCurrentEpoch")
+           oldestWithReader   == IF readerSlot > 0 THEN Min(currentEpochValue, readerSlot) ELSE currentEpochValue
+           oldestOngoingCall  == IF reclaimerSlot > 0 THEN Min(oldestWithReader, reclaimerSlot) ELSE oldestWithReader
+           safeToReclaimEpoch == oldestOngoingCall - 1
+       IN IF triggerEpoch <= safeToReclaimEpoch
+          THEN /\ memory' = [memory EXCEPT !.objectFreed = TRUE]
+               /\ reclaimerPc' = "Done"
+          ELSE /\ UNCHANGED <<memory, reclaimerPc>>
+    /\ UNCHANGED <<storeBuffer, readerInCriticalSection, readerAnnouncedEpoch, triggerEpoch, readerPc>>
 
-Next == \/ Acq \/ Refresh \/ Cap \/ Use \/ Rel
-        \/ AcqRc \/ Retire \/ Bump \/ RefreshRc \/ Compute
-        \/ (\E p \in Procs : FlushOne(p))
+Next == \/ Acquire \/ ProtectAndDrain \/ ReadObject \/ Dereference \/ Release
+        \/ AcquireReclaimer \/ Unlink \/ BumpCurrentEpoch \/ ProtectAndDrainReclaimer \/ ComputeNewSafeToReclaimEpoch
+        \/ (\E p \in Threads : FlushOne(p))
 
 Spec == Init /\ [][Next]_vars
 
 \* SAFETY: never free while a protected reader still dereferences the object.
-NoUseAfterFree == ~ (mem.freed /\ holds)
+NoUseAfterFree == ~ (memory.objectFreed /\ readerInCriticalSection)
 =============================================================================

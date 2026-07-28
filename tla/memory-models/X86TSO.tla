@@ -49,10 +49,10 @@ T1 == "t1"
 T2 == "t2"
 Procs == {T1, T2}
 
-VARIABLES mem, sb, r1, r2, pc
-vars == <<mem, sb, r1, r2, pc>>
+VARIABLES memory, storeBuffer, r1, r2, pc
+vars == <<memory, storeBuffer, r1, r2, pc>>
 
-\* Implicit substitution: this module declares mem and sb, so the shared
+\* Implicit substitution: this module declares memory and storeBuffer, so the shared
 \* harness binds to them directly.
 SB == INSTANCE StoreBuffer
 
@@ -60,8 +60,8 @@ OwnVar(p)   == IF p = T1 THEN "x" ELSE "y"
 OtherVar(p) == IF p = T1 THEN "y" ELSE "x"
 
 Init ==
-    /\ mem = [x |-> 0, y |-> 0]
-    /\ sb = [p \in Procs |-> <<>>]
+    /\ memory = [x |-> 0, y |-> 0]
+    /\ storeBuffer = [p \in Procs |-> <<>>]
     /\ r1 = -1
     /\ r2 = -1
     /\ pc = [p \in Procs |-> "store"]
@@ -71,15 +71,15 @@ FlushOne(p) == SB!FlushOne(p) /\ UNCHANGED <<r1, r2, pc>>
 
 DoStore(p) ==
     /\ pc[p] = "store"
-    /\ sb' = SB!Buffer(p, OwnVar(p), 1)
+    /\ storeBuffer' = SB!Buffer(p, OwnVar(p), 1)
     /\ pc' = [pc EXCEPT ![p] = IF Fenced THEN "fence" ELSE "load"]
-    /\ UNCHANGED <<mem, r1, r2>>
+    /\ UNCHANGED <<memory, r1, r2>>
 
 \* MFENCE: everything this core has pending becomes globally visible at once.
 DoFence(p) ==
     /\ pc[p] = "fence"
-    /\ mem' = SB!Fenced(p)
-    /\ sb' = SB!Drained(p)
+    /\ memory' = SB!Fenced(p)
+    /\ storeBuffer' = SB!Drained(p)
     /\ pc' = [pc EXCEPT ![p] = "load"]
     /\ UNCHANGED <<r1, r2>>
 
@@ -89,7 +89,7 @@ DoLoad(p) ==
        IN IF p = T1 THEN r1' = v /\ UNCHANGED r2
                     ELSE r2' = v /\ UNCHANGED r1
     /\ pc' = [pc EXCEPT ![p] = "done"]
-    /\ UNCHANGED <<mem, sb>>
+    /\ UNCHANGED <<memory, storeBuffer>>
 
 Next ==
     \/ \E p \in Procs : DoStore(p) \/ DoFence(p) \/ DoLoad(p) \/ FlushOne(p)

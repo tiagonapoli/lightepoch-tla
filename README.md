@@ -270,64 +270,69 @@ So the reader thread genuinely believes it announced itself, while the reclaimer
 thread genuinely observes an empty slot. **Both are reading correctly.** No cache is
 "stale" in the sense of a bug; this is architecturally permitted behaviour.
 
-In the trace, that queue is `sb` (one per thread) and memory is `mem`:
+In the trace, that queue is `storeBuffer` (one per thread) and memory is `memory`:
 
 | Symbol | Meaning | Production equivalent |
 | --- | --- | --- |
-| `mem.ce` | the global current epoch | `CurrentEpoch` |
-| `mem.lce` | the reader's slot, as **the rest of the machine sees it** | `(*(tableAligned + entry)).localCurrentEpoch` |
-| `mem.ret` | object unlinked / retired | `curPage = 0` |
-| `mem.freed` | object actually freed | the `onDrain` callback ran |
-| `sb[Rd]` | reader's private store queue | the reader core's store buffer |
-| `sb[Rc]` | reclaimer's private store queue | the reclaimer core's store buffer |
-| `holds` | reader is dereferencing the object | inside the critical section |
+| `memory.currentEpoch` | the global current epoch | `CurrentEpoch` |
+| `memory.localCurrentEpoch` | the reader's slot, as **the rest of the machine sees it** | `(*(tableAligned + entry)).localCurrentEpoch` |
+| `memory.objectUnlinked` | object unlinked / retired | `curPage = 0` |
+| `memory.objectFreed` | object actually freed | the `onDrain` callback ran |
+| `storeBuffer[Reader]` | reader's private store queue | the reader core's store buffer |
+| `storeBuffer[Reclaimer]` | reclaimer's private store queue | the reclaimer core's store buffer |
+| `readerInCriticalSection` | reader is dereferencing the object | inside the critical section |
+| `readerAnnouncedEpoch` | what the reader *thinks* it published | the value it stored into its slot |
+| `triggerEpoch` | epoch the retire was tagged with | `epoch.BumpCurrentEpoch(onDrain)` |
 
 The safety property is one line — never free while a reader is still inside:
 
 ```tla
-NoUseAfterFree == ~ (mem.freed /\ holds)
+NoUseAfterFree == ~ (memory.objectFreed /\ readerInCriticalSection)
 ```
 
 ### The trace
 
 TLC finds the violation in **five steps** (six states, counting the initial one). Watch
-one value: `mem.lce`. It is `0` — "no reader present" — for the entire trace, even
-though the reader announced itself in step 1 and never left.
+one value: `memory.localCurrentEpoch`. It is `0` — "no reader present" — for the entire
+trace, even though the reader announced itself in step 1 and never left.
 
 **Initial state.** Epoch 1 is current, the reader's slot is empty, both queues are
 empty, nothing is retired or freed.
 
 ```
-mem = [ce |-> 1, lce |-> 0, ret |-> FALSE, freed |-> FALSE]
-sb  = [Rd |-> <<>>, Rc |-> <<>>]
+memory      = [currentEpoch |-> 1, localCurrentEpoch |-> 0, objectUnlinked |-> FALSE, objectFreed |-> FALSE]
+storeBuffer = [Reader |-> <<>>, Reclaimer |-> <<>>]
 ```
 
 ---
 
-**Step 1 — `Acq`: the reader announces itself. This is the bug.**
+**Step 1 — `Acquire`: the reader announces itself. This is the bug.**
 
 The reader reads `CurrentEpoch` (= 1) and writes it into its slot. That write is a
 **plain store**, so it goes into the reader's queue, not to memory
 ([`LightEpoch.cs:527`](src/LightEpoch.Implementations/LightEpoch.cs#L527)).
 
 ```
-sb  = [Rd |-> <<[f |-> "lce", v |-> 1]>>, Rc |-> <<>>]   ← queued, private to Rd
-mem = [ce |-> 1, lce |-> 0, ...]                          ← memory still says "nobody here"
+storeBuffer = [Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>, Reclaimer |-> <<>>]   ← queued, private to Reader
+memory      = [currentEpoch |-> 1, localCurrentEpoch |-> 0, ...]                          ← memory still says "nobody here"
+readerAnnouncedEpoch = 1                                                                  ← what the reader believes
 ```
 
-Note `mem.lce` is still `0`. The reader has announced itself to *itself*. The rest of
-the machine has no idea it exists. **This is the only unordered access in the entire
-program** — everything the reclaimer does is already correctly fenced.
+Note `memory.localCurrentEpoch` is still `0`. The reader has announced itself to
+*itself*. The rest of the machine has no idea it exists. **This is the only unordered
+access in the entire program** — everything the reclaimer does is already correctly
+fenced.
 
 ---
 
-**Step 2 — `Cap`: the reader checks the object is still linked, and takes it.**
+**Step 2 — `ReadObject`: the reader checks the object is still linked, and takes it.**
 
-The reader loads `ret` and sees `FALSE`, so the object looks live. It enters its
-critical section: `holds = TRUE`. From here on, freeing the object is a use-after-free.
+The reader loads `objectUnlinked` and sees `FALSE`, so the object looks live. It enters
+its critical section: `readerInCriticalSection = TRUE`. From here on, freeing the object
+is a use-after-free.
 
 ```
-holds = TRUE     ← reader is now dereferencing the object
+readerInCriticalSection = TRUE     ← reader is now dereferencing the object
 ```
 
 The reader has done everything the API asks of it. It is correctly protected under the
@@ -335,26 +340,29 @@ epoch contract. Everything that follows is the reclaimer failing to notice.
 
 ---
 
-**Step 3 — `Retire`: the reclaimer unlinks the object.**
+**Step 3 — `Unlink`: the reclaimer unlinks the object.**
 
 ```
-sb = [Rd |-> <<[f |-> "lce", v |-> 1]>>, Rc |-> <<[f |-> "ret", v |-> TRUE]>>]
+storeBuffer = [ Reader    |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>,
+                Reclaimer |-> <<[f |-> "objectUnlinked", v |-> TRUE]>> ]
 ```
 
 Both queues now hold one pending store. The reader's announce is still not visible.
 
 ---
 
-**Step 4 — `Bump`: the reclaimer increments the epoch — and this fences *its own* buffer.**
+**Step 4 — `BumpCurrentEpoch`: the reclaimer increments the epoch — and this fences *its own* buffer.**
 
 `Interlocked.Increment(ref CurrentEpoch)`
 ([`LightEpoch.cs:365`](src/LightEpoch.Implementations/LightEpoch.cs#L365)) is a locked
-RMW, which is a **full barrier**. The reclaimer's queue drains completely: `ret` is now
-visible in memory, and the epoch advances to 2. The retire is tagged with epoch 1.
+RMW, which is a **full barrier**. The reclaimer's queue drains completely:
+`objectUnlinked` is now visible in memory, and the epoch advances to 2. The retire is
+tagged with epoch 1.
 
 ```
-mem = [ce |-> 2, lce |-> 0, ret |-> TRUE, freed |-> FALSE]
-sb  = [Rd |-> <<[f |-> "lce", v |-> 1]>>, Rc |-> <<>>]   ← Rc drained; Rd's announce STILL queued
+memory      = [currentEpoch |-> 2, localCurrentEpoch |-> 0, objectUnlinked |-> TRUE, objectFreed |-> FALSE]
+storeBuffer = [Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>, Reclaimer |-> <<>>]
+triggerEpoch = 1                    ← Reclaimer drained; Reader's announce STILL queued
 ```
 
 This step is the one most people expect to save them, and it is worth being precise
@@ -365,7 +373,7 @@ reader can see.
 
 ---
 
-**Step 5 — `Compute`: the reclaimer scans the slots and frees the object.**
+**Step 5 — `ComputeNewSafeToReclaimEpoch`: the reclaimer scans the slots and frees the object.**
 
 `ComputeNewSafeToReclaimEpoch`
 ([`LightEpoch.cs:435`](src/LightEpoch.Implementations/LightEpoch.cs#L435)) walks every
@@ -387,12 +395,13 @@ active**. Therefore `oldestOngoingCall = CurrentEpoch = 2`, and
 safe to free:
 
 ```
-mem = [ce |-> 2, lce |-> 0, ret |-> TRUE, freed |-> TRUE]
-holds = TRUE                                  ← reader is STILL dereferencing it
+memory = [currentEpoch |-> 2, localCurrentEpoch |-> 0, objectUnlinked |-> TRUE, objectFreed |-> TRUE]
+readerInCriticalSection = TRUE                ← reader is STILL dereferencing it
 ```
 
-`mem.freed /\ holds` — **`NoUseAfterFree` is violated.** On ARM64 the reader's next
-dereference of that page takes an access violation (`0xC0000005`).
+`memory.objectFreed /\ readerInCriticalSection` — **`NoUseAfterFree` is violated.** On
+ARM64 the reader's next dereference of that page takes an access violation
+(`0xC0000005`).
 
 The reader's announce is *still* in its store buffer, unflushed, at the moment the
 memory is released.
