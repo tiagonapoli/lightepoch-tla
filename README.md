@@ -19,10 +19,6 @@ The bug is demonstrated in two complementary ways:
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
    use-after-free in the baseline and proves each fix closes it.
 
-> Terminology note: throughout, "fault" / "memory fault" / `0xC0000005` all
-> mean the process touched memory that had been unmapped — the
-> observable symptom of reclaiming memory that is still in use.
-
 ---
 
 ## Overview: where the barrier is missing
@@ -32,12 +28,12 @@ Epoch-based reclamation rests on one agreement between two threads:
 > If a reader has **announced** epoch `E`, then a reclaimer **must see** that
 > announcement, and must not reclaim anything retired in epoch `E` or later.
 
-That is the part the hardware does not give you for free. It requires the reader's
-announce *store* to be globally visible before the reader's first *load* of the
-object — and "store, then load" is exactly the one ordering that **both x86-TSO and
-ARM64 are allowed to reorder**. Preventing it needs an explicit **StoreLoad** fence
-— which flushes the core's store buffer and ensures later loads happen only after
-the store is globally visible — and that fence is missing in `LightEpoch`.
+This requires the reader's announce *store* to be globally visible before the
+reader's first *load* of the object — and "store, then load" is exactly the one
+ordering that **both x86-TSO and ARM64 are allowed to reorder**. Preventing it needs
+an explicit **StoreLoad** fence — which flushes the core's store buffer and ensures
+later loads happen only after the store is globally visible — and that fence is
+missing in `LightEpoch`.
 
 ### The reader side — announces with a plain store
 
@@ -104,7 +100,7 @@ on Windows, `sys_membarrier` on Linux). Short of that,
 The rest of this document establishes that this is not merely theoretical: it
 reproduces on real ARM64 and x86-64 hardware ([Results](#results-reproduced-on-arm64-and-x86-64)),
 and TLA+ models run on TLC find the exact interleaving
-([Corner case](#corner-case-the-exact-interleaving-step-by-step)).
+([Corner case](#the-exact-interleaving-with-tla)).
 
 ---
 
@@ -119,7 +115,11 @@ using the epoch API, and both are covered: `--pattern bare` (`Resume()` → acce
 `InternalRefresh()`/`ProtectAndDrain()` → access → `Suspend()`), which mirrors a
 Tsavorite `BasicContext` operation ([§8](Draft.md#8-how-tsavorite-actually-uses-lightepoch)).
 
-### Hardware under test
+Every configuration is also run against a `fullbarrier` build — the same code with
+the missing `Interlocked.MemoryBarrier()` added right after the announce — and it
+reliably shows no issues.
+
+### Hardware used for tests
 
 | Machine | Architecture | CPU | Microarch | Phys cores / LPs | SMT | NUMA nodes |
 |---|---|---|---|---|---|---|
@@ -136,9 +136,10 @@ and Xeon 8171M, SMT siblings are the logical-processor pairs `(2i, 2i+1)`.
 
 The harness allocates and releases whole memory pages under epoch protection: a page
 is unmapped only once the epoch's own drain logic declares it safe to reclaim.
-Detection is therefore a genuine hardware fault — the reader dereferences a page the
-OS has already unmapped — not a software-level check. "Time to fault" is wall-clock
-from process start; `SURVIVED` means the run was killed at the cap with no fault.
+Detection of a bug is therefore a genuine hardware fault — the reader dereferences a
+page the OS has already unmapped — not a software-level check. "Time to fault" is
+wall-clock from process start; `SURVIVED` means the run was killed at the cap with no
+fault.
 
 | CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) |
 |---|---|---|---|---|
@@ -150,25 +151,6 @@ from process start; `SURVIVED` means the run was killed at the cap with no fault
 | Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | no fault in 120 s *(capped)* | — |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s |
-
-Concurrency is the dominant factor in how fast the window opens: every extra pair is
-another independent chance per unit time for the reclaimer's scan to run before the
-reader's unfenced announce becomes visible. Two results stand out:
-
-* **`bare` is much harder to reproduce on Neoverse-N1 than on N2.** N2 faults under
-  `bare` in as little as 7 s; N1 did not fault under `bare` in any 120 s run, at any
-  pair count. Under `resume-and-refresh` — the sequence a real Tsavorite
-  `BasicContext` operation performs — N1 faults readily. These are capped
-  observations, not proof of absence.
-* **The two parts differ by more than an order of magnitude in how cheap the repro
-  is.** N2 reproduces essentially on demand — 50 faults in 51 attempts, about 43
-  minutes end to end, fastest fault in 1 s. N1 faults on roughly one attempt in
-  three, so the same 50 faults cost hours of wall clock.
-
-Across these repeated attempts the faults are **bursty** rather than evenly spread —
-long runs of misses sit between clusters of quick faults. This is why a single
-"survived" run is weak evidence, and why the repeat count matters more than any one
-time-to-fault.
 
 `fullbarrier` was run for a full 300 s on each machine under the exact configuration
 that faults the baseline there, and survived every time.
@@ -185,32 +167,21 @@ System.AccessViolationException: Attempted to read or write protected memory.
 
 ### x86-64 — logical use-after-free detection
 
-The ARM64 unmap trick cannot work here: the unmap forces a TLB-shootdown IPI, which
-fences the reader and destroys the window under test
+The previous memory map/unmap workload cannot be used here: on x86 the unmap forces a
+TLB-shootdown IPI, which fences the reader and closes the very window under test
 ([Appendix A](Draft.md#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
-So `--quarantine` mode writes a poison value into the reclaimed page instead,
-detecting the use-after-free without unmapping anything.
+So `--quarantine` mode pre-allocates the pages and never unmaps them: when a page is
+"freed", a poison value is written over it. A reader that reads poison has touched
+memory the epoch already reclaimed — a genuine epoch bug.
 
-Run plainly, violations are rare — historically about one per 2.4 billion pair-rounds
-— and the reason is structural, not bad luck. `Acquire()` announces via
-`TryAcquireEntry()`, whose `Interlocked.CompareExchange` targets `Entry.threadId` at
-`[FieldOffset(8)]` — the **same 64-byte cache line** as `localCurrentEpoch` at
-`[FieldOffset(0)]`. That `lock cmpxchg` both fences and takes the line exclusive, so
-the announce a few lines later retires almost immediately and the reclaimer never
-scans in between. Delaying the reclaimer does not help either: it pushes the "reader
-saw a stale `curPage`" rate from 3 % to 100 % with violations still at zero, because
-the same delay postpones the scan.
-
-What works is **read-only disturber threads** that only read the epoch table. Reads
-cannot change an epoch decision, so this cannot manufacture a false positive, but
-they keep the announce line shared — the announce must now win an RFO, and since x86
-store buffers drain in order it stays pending long enough to be observable. The
-implementation under test is untouched; only cache-line state and timing change.
-
-Two placement rules matter: disturbers must sit on **distinct physical cores** (SMT
-siblings share L1 and generate no coherence traffic — packing them there collapsed
-violations from thousands to zero), and the count is a **resonance, not a monotonic
-knob** (on the EPYC: 4 → 0 violations, 8 → 27, 10 → 4,515, 12 → 2).
+Run plainly, violations are extremely rare — historically about one per 2.4 billion
+pair-rounds. Reproducing them at a useful rate required adding **read-only "disturber"
+threads** that do nothing but read the epoch table, keeping its cache line shared and
+so delaying the reader's announce long enough to be observed. Reads cannot change an
+epoch decision, so they cannot manufacture a false positive, and the implementation
+under test is untouched. Disturbers must be pinned to **distinct physical cores**;
+put them on SMT siblings and they produce no coherence traffic, silently dropping the
+yield to zero.
 
 With up to 10 disturbers per pair, and each pair's reader and reclaimer straddling
 the highest-latency boundary on its machine:
@@ -221,67 +192,39 @@ the highest-latency boundary on its machine:
 | EPYC 7763 | `bare` | `fullbarrier` | 0 | 50,000,000 | 165 s | 0 |
 | EPYC 7763 | `resume-and-refresh` | `baseline` | **1,004** | 50,000,000 | 159 s | **20.1** |
 | EPYC 7763 | `resume-and-refresh` | `fullbarrier` | 0 | 50,000,000 | 158 s | 0 |
-| Xeon 8171M | `bare` | `baseline` | **648** | 45,000,000 | ~174 s <sup>†</sup> | **14.4** |
-| Xeon 8171M | `bare` | `fullbarrier` | 0 | 45,000,000 | ~174 s <sup>†</sup> | 0 |
-| Xeon 8171M | `resume-and-refresh` | `baseline` | **665** | 60,000,000 | ~165 s <sup>†</sup> | **11.1** |
-| Xeon 8171M | `resume-and-refresh` | `fullbarrier` | 0 | 60,000,000 | ~165 s <sup>†</sup> | 0 |
+| Xeon 8171M | `bare` | `baseline` | **648** | 45,000,000 | ~174 s | **14.4** |
+| Xeon 8171M | `bare` | `fullbarrier` | 0 | 45,000,000 | ~174 s | 0 |
+| Xeon 8171M | `resume-and-refresh` | `baseline` | **665** | 60,000,000 | ~165 s | **11.1** |
+| Xeon 8171M | `resume-and-refresh` | `fullbarrier` | 0 | 60,000,000 | ~165 s | 0 |
 | | | **total** | **3,739 / 0** | 410,000,000 | ~22 min | |
 
-`Rounds` is rounds-per-pair × pairs × waves, per impl. Compare rows using the last
-column; raw totals depend on how many waves fit the time budget.
-
-<sup>†</sup> Xeon per-impl times are **derived, not measured** — only per-pattern wall
-clock was recorded (348 s `bare`, 331 s `resume-and-refresh`), split evenly.
-
-The exact placement, since the result depends on it (24 of 32 LPs on the EPYC, 32 of
-64 on the Xeon; every disturber on its own physical core):
+Each pair is a separate process, pinned by hand. On the EPYC two run concurrently,
+straddling the LP 0-15 / LP 16-31 latency boundary:
 
 ```
-EPYC 7763   readers and reclaimers straddle the LP 0-15 / LP 16-31 latency boundary
-  pair A    reclaimer LP 0   reader LP 16   disturbers 2,4,6,8,10,18,20,22,24,26
-  pair B    reclaimer LP 12  reader LP 28   disturbers 3,5,7,9,11,19,21,23,25,27
-
-Xeon 8171M  socket 0 = LP 0-31, socket 1 = LP 32-63, so every pair straddles sockets
-  pair 0    reclaimer LP 0   reader LP 32   disturbers 2,4,6,8,10,34,36,38,40,42
-  pair 1    reclaimer LP 12  reader LP 44   disturbers 14,16,18,20,22,46,48,50,52,54
-  pair 2    reclaimer LP 24  reader LP 56   disturbers 26,28,30,58,60,62
+dotnet LightEpoch.Repro.dll --impl baseline --pattern bare --pairs 1 --rounds 5000000 --quarantine \
+    --reclaimer-core 0  --reader-core 16 --disturber-cores 2,4,6,8,10,18,20,22,24,26
+dotnet LightEpoch.Repro.dll --impl baseline --pattern bare --pairs 1 --rounds 5000000 --quarantine \
+    --reclaimer-core 12 --reader-core 28 --disturber-cores 3,5,7,9,11,19,21,23,25,27
 ```
 
-This raises the hit rate by more than four orders of magnitude, and the violations
-are **sustained, not front-loaded**: all 17 baseline waves produced violations
-(weakest 60, strongest 603), with a flat per-run decile histogram in every wave —
-`[74 61 53 70 58 59 42 71 61 54]` on the EPYC, `[11 13 10 7 14 8 11 14 14 12]` on the
-Xeon — several trending upward toward the end.
+On the Xeon three run concurrently, each straddling the two sockets (socket 0 =
+LP 0-31, socket 1 = LP 32-63):
+
+```
+    --reclaimer-core 0  --reader-core 32 --disturber-cores 2,4,6,8,10,34,36,38,40,42
+    --reclaimer-core 12 --reader-core 44 --disturber-cores 14,16,18,20,22,46,48,50,52,54
+    --reclaimer-core 24 --reader-core 56 --disturber-cores 26,28,30,58,60,62
+```
+
+`--impl fullbarrier` and `--pattern resume-and-refresh` are run with the identical
+core assignments.
 
 The control is what makes this meaningful: `fullbarrier` recorded **0 violations
 across 13.7 million sampled race-window rounds**, while *entering* the window more
 often than the baseline (on the Xeon, 2,104,411 sampled rounds against 1,400,545). It
 visits the dangerous interleaving more and never corrupts, which isolates the missing
 fence from any property of the harness.
-
-Which *pattern* reproduces better is not stable — an earlier run had
-`resume-and-refresh` ahead of `bare` by 2.4× on the EPYC, and here the order
-reverses. Treat that gap as run-to-run noise.
-
-### What this establishes
-
-* The unfenced announce is **incorrect on both architectures**, matching the TLA+
-  result (`X86TSO` with no fence is **VIOLATED**; ARM64 is weaker than TSO, so the
-  same window is open there too).
-* **The fix was clean under every condition that broke the baseline.**
-  `fullbarrier` was run on every machine and every configuration in the tables above
-  and never faulted or violated, including while entering the race window more often
-  than the baseline did. The buggy build failed on both architectures under exactly
-  the same conditions.
-* **The failure is repeatable, not a one-off.** 50 independent faults were collected
-  back to back on Neoverse-N2, at a 98 % hit rate. On x86-64, read-only disturbers
-  make the window wide enough to produce 3,739 violations across two vendors in about
-  22 minutes, spread evenly through every run, against 0 for the fenced build.
-* **How easily it reproduces varies enormously by microarchitecture and workload
-  shape.** Neoverse-N2 faults under the minimal `bare` sequence within seconds, and
-  under `resume-and-refresh` too. Neoverse-N1 never faulted under `bare` at any pair
-  count, and reproduces only under the Tsavorite-like `resume-and-refresh` sequence.
-  A clean run on one ARM64 part therefore says nothing about another.
 
 ---
 
@@ -404,15 +347,14 @@ dotnet LightEpoch.Repro.dll --impl baseline --pairs 1 --rounds 5000000 --quarant
     --reclaimer-core 0 --reader-core 16 --disturber-cores 2,4,6,8,10,18,20,22,24,26
 ```
 
-x86 violations are rare without disturbers, so run the buggy build several times (the
-counts in the first x86-64 table are totals over 30–40 pair-runs) and always compare
-against a fixed build over the same number of runs. With disturbers the rate is high
-enough that a single run is informative, but the `fullbarrier` control should still be
-run for the same duration.
+x86 violations are rare without disturbers, so run the buggy build several times and
+always compare against a fixed build over the same number of runs. With disturbers
+the rate is high enough that a single run is informative, but the `fullbarrier`
+control should still be run for the same duration.
 
 ---
 
-## Corner case: the exact interleaving, step by step
+## The exact interleaving with TLA+
 
 The hardware repro proves the bug *happens*. It cannot show you *why*, because by the
 time the page faults the evidence is gone. The TLA+ model can: TLC explores every
