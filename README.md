@@ -174,14 +174,6 @@ fault.
 `fullbarrier` was run for a full 300 s on each machine under the exact configuration
 that faults the baseline there, and survived every time.
 
-`bare` on Neoverse-N1 is the least likely configuration to fault and needs repeated
-attempts, so its cells report the fastest observed fault together with the hit rate
-over repeated runs. At 16 threads it faulted in 5 of 16 runs (≈30 %), at 38, 44, 48,
-52 and 65 s; N2 under the same configuration faults in 6 of 10 runs. Because every N1
-fault landed after 38 s, a single attempt or a short run cap frequently shows nothing
-— that is a sampling artifact, not an absence of the bug. Every other row in the table
-faults readily enough that one run suffices.
-
 Faulting stack, every time — the reader dereferencing a page the epoch already freed:
 
 ```
