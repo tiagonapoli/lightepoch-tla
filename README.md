@@ -33,7 +33,7 @@ running the **unmodified** epoch implementation, with the epoch's own
 free. The harness never frees anything on its own. There are two different patterns of
 using the epoch API, and both are covered: `--pattern bare` (`Resume()` → access →
 `Suspend()`) and `--pattern resume-and-refresh`, which mirrors a Tsavorite
-`BasicContext` operation ([§8](FullReport.md#8-how-tsavorite-actually-uses-lightepoch)).
+`BasicContext` operation ([§8](Draft.md#8-how-tsavorite-actually-uses-lightepoch)).
 
 ### Hardware under test
 
@@ -80,7 +80,7 @@ x86 needs a different detection mechanism, because the memory unmap used on ARM6
 forces a TLB-shootdown IPI that introduces a memory barrier on the reader and
 destroys the very window under test
 (the full explanation is
-[Appendix A](FullReport.md#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
+[Appendix A](Draft.md#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
 So instead the `--quarantine` mode is used: a poison value is written into the page
 being reclaimed, which allows a use-after-free to be detected without unmapping
 anything. Counts below are use-after-free **reads** observed:
@@ -193,7 +193,7 @@ So the x86 mode keeps the kernel out of the loop entirely:
   class; the ARM64 unmap path is untouched.
 
 Because this verdict is software rather than hardware, the detector itself is
-validated with `--self-test` — see [Appendix A.7](FullReport.md#a7-validating-the-detector).
+validated with `--self-test` — see [Appendix A.7](Draft.md#a7-validating-the-detector).
 
 ### Reproducing the numbers
 
@@ -484,5 +484,5 @@ FIFO drain order.
 The analysis behind these results — the algorithm and the bug, the x86-TSO and ARM64
 memory models, each candidate fix, how the repros detect a use-after-free, how
 Tsavorite actually drives the epoch, and the TLA+ models — is in
-**[FullReport.md](FullReport.md)**.
+**[Draft.md](Draft.md)**.
 

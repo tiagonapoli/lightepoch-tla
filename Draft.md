@@ -283,7 +283,7 @@ All three fixes are proven safe in `tla/` (`FixedLightEpochWithMemoryBarrier`,
 ```
 .
 ├── README.md                        # hardware results and how to run the repros
-├── FullReport.md                    # this document: the analysis behind the results
+├── Draft.md                         # this document: the analysis behind the results
 ├── src/
 │   ├── LightEpoch.Implementations/  # the 4 epoch variants (shared library)
 │   │   ├── LightEpoch.cs                              # baseline (buggy)
