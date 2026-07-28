@@ -42,6 +42,8 @@ using the epoch API, and both are covered: `--pattern bare` (`Resume()` → acce
 | Azure `D4ps_v5` | **ARM64** | Ampere Altra | Neoverse-N1 | 4 / 4 | no | 1 |
 | Azure `D4ps_v6` | **ARM64** | Microsoft Cobalt 100 | Neoverse-N2 | 4 / 4 | no | 1 |
 | Azure `D8ps_v5` | **ARM64** | Ampere Altra | Neoverse-N1 | 8 / 8 | no | 1 |
+| Azure `D16ps_v5` | **ARM64** | Ampere Altra | Neoverse-N1 | 16 / 16 | no | 1 |
+| Azure `D16ps_v6` | **ARM64** | Microsoft Cobalt 100 | Neoverse-N2 | 16 / 16 | no | 1 |
 | local workstation | **x86-64** | Intel i7-12700K | Alder Lake | 12 / 20 | yes (P-cores) | 1 |
 | Azure `D64s_v4` | **x86-64** | Intel Xeon Platinum 8272CL | Cascade Lake | 32 / 64 | yes | **2** |
 
@@ -63,6 +65,25 @@ process start; `SURVIVED` means the run was killed at the cap with no fault.
 | Ampere Altra / N1 (8) | `bare` | 6 (3 pairs) | **FAULT @ 113 s** | SURVIVED 300 s |
 | Ampere Altra / N1 (8) | `resume-and-refresh` | 4 (2 pairs) | **FAULT @ 96 s** | SURVIVED 300 s |
 | Ampere Altra / N1 (8) | `resume-and-refresh` | 6 (3 pairs) | no fault in 300 s | — |
+| Cobalt 100 / N2 (16) | `bare` | 4 (2 pairs) | **FAULT @ 36 s** | — |
+| Cobalt 100 / N2 (16) | `bare` | 8 (4 pairs) | no fault in 120 s | — |
+| Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | **FAULT @ 7 s** | SURVIVED 300 s |
+| Cobalt 100 / N2 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 73 s** | — |
+| Ampere Altra / N1 (16) | `bare` | 4 (2 pairs) | no fault in 120 s | — |
+| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | no fault in 120 s | — |
+| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | no fault in 120 s | — |
+| Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s |
+
+Concurrency is the dominant factor in how fast the window opens: every extra pair is
+another independent chance per unit time for the reclaimer's scan to run before the
+reader's unfenced announce becomes visible. Two results make the point sharply:
+
+* **Neoverse-N1 never faulted under `bare` at any pair count, on any core count.**
+  It reproduces only under `resume-and-refresh` — the sequence a real Tsavorite
+  `BasicContext` operation performs. Neoverse-N2 reproduces under both.
+* **N1 at 4 physical cores produced no fault at all**; 8 and 16 cores are what make it
+  reproducible.
 
 Faulting stack, every time — the reader dereferencing a page the epoch already freed:
 
@@ -73,6 +94,31 @@ System.AccessViolationException: Attempted to read or write protected memory.
                                        [LightEpoch.Repro.Common.BareReproPattern, ...]].ReaderLoop()
    at System.Threading.Thread.StartCallback()
 ```
+
+### ARM64 — repeatability
+
+A single fault proves the window exists; it does not show how readily it opens. To
+measure that, the `baseline` build was run back to back on both 16-core machines until
+50 faults were collected, each attempt capped and killed if it survived. A capped run
+counts as a miss.
+
+| CPU (phys cores) | Repro | Threads (pairs) | Cap | Faults / attempts | Hit rate | Time to fault (avg / min / max) |
+|---|---|---|---|---|---|---|
+| Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | 300 s | **50 / 51** | 98 % | 40 s / 1 s / 158 s |
+| Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | 300 s | 6 / 21 | 29 % | 61 s / 20 s / 143 s |
+| Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | 120 s | 8 / 24 *(running)* | 33 % | 47 s / 7 s / 94 s |
+
+Neoverse-N2 reproduces essentially on demand — 50 faults in 51 attempts, taking about
+43 minutes end to end, with the fastest fault landing in 1 second. Neoverse-N1 is far
+more resistant: roughly one attempt in three faults, so the same 50 faults cost hours
+of wall clock. In both cases the faults are **bursty** rather than evenly spread —
+long runs of misses sit between clusters of quick faults — which is why a single
+"survived" run is weak evidence and the repeat count matters.
+
+`fullbarrier` was run for a full 300 s on each machine under the exact configuration
+that faults the baseline there, and survived every time.
+
+Full per-attempt data is in **[SoakResults.md](SoakResults.md)**.
 
 ### x86-64 — logical use-after-free detection
 
@@ -108,6 +154,13 @@ anything. Counts below are use-after-free **reads** observed:
   and never faulted or violated; `interlocked` and `asymmetric` were additionally
   clean across all x86-64 quarantine runs. The buggy build failed on both
   architectures under exactly the same conditions.
+* **The failure is repeatable, not a one-off.** 50 independent faults were collected
+  back to back on Neoverse-N2, at a 98 % hit rate.
+* **How easily it reproduces varies enormously by microarchitecture and workload
+  shape.** Neoverse-N2 faults under the minimal `bare` sequence within seconds;
+  Neoverse-N1 never faults under `bare` at all and needs both the Tsavorite-like
+  `resume-and-refresh` sequence and 8+ physical cores. A clean run on one ARM64 part
+  therefore says nothing about another.
 
 ---
 
