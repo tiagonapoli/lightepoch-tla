@@ -37,7 +37,6 @@ The bug is demonstrated in two complementary ways:
   * [Note on StoreBuffer](#note-on-storebuffer)
   * [The raw TLC output](#the-raw-tlc-output)
   * [The same trace, step by step](#the-same-trace-step-by-step)
-  * [Why it is genuinely hard to see](#why-it-is-genuinely-hard-to-see)
   * [What actually fixes it, and what does not](#what-actually-fixes-it-and-what-does-not)
   * [The same trace, in production shape](#the-same-trace-in-production-shape)
   * [Reading the model yourself](#reading-the-model-yourself)
@@ -589,10 +588,9 @@ storeBuffer = [Reader |-> <<[f |-> "localCurrentEpoch", v |-> 1]>>, Reclaimer |-
 triggerEpoch = 1                    ← Reclaimer drained; Reader's announce STILL queued
 ```
 
-This step is the one most people expect to save them, and it is worth being precise
-about why it does not. A barrier is **local to the core that executes it**. It flushes
-the *reclaimer's* store buffer. It has no power to reach into the *reader's* store
-buffer and flush that. The reader's announce is still sitting in a queue that only the
+A barrier is **local to the core that executes it**. This one flushes the
+*reclaimer's* store buffer; it has no power to reach into the *reader's* store buffer
+and flush that. The reader's announce is still sitting in a queue that only the
 reader can see.
 
 ---
@@ -630,30 +628,13 @@ ARM64 the reader's next dereference of that page takes an access violation
 The reader's announce is *still* in its store buffer, unflushed, at the moment the
 memory is released.
 
-### Why it is genuinely hard to see
-
-Three properties conspire to make this bug nearly invisible in review:
-
-1. **The `0` that means "absent" is indistinguishable from the `0` that means "not yet
-   visible."** The scan's `if (0 != entry_epoch)` cannot tell a thread that never
-   entered from a thread whose announce is still queued. A skipped slot and an absent
-   thread look identical.
-2. **Every individual thread is correct in isolation.** The reader announced before
-   entering. The reclaimer bumped the epoch before scanning. Read either thread's code
-   on its own and it is right. The defect exists only in the *ordering relationship
-   between* them, which no single function shows.
-3. **The reader can self-verify and be misled.** Because of store forwarding, if the
-   reader re-reads its own slot it sees `1` — the value it wrote. Any debug assertion
-   the reader makes about its own protection passes. The value is only invisible
-   *from other cores*.
-
 ### What actually fixes it, and what does not
 
 The reader must not be allowed to *load* `ret` until its announce *store* is globally
 visible. That specific constraint — no load may float above an earlier store — is a
 **StoreLoad** barrier, the one ordering x86-TSO does **not** give away for free.
 
-This is why the usual instincts fail:
+Why the alternatives do not work:
 
 | Attempt | Why it does not work |
 | --- | --- |
