@@ -101,15 +101,6 @@ that forces every other core to drain
 on Windows, `sys_membarrier` on Linux). Short of that,
 **the fix must be on the reader's core**, between the announce and the first load.
 
-### Why the obvious candidates don't close it
-
-| Candidate | Why it fails |
-| --- | --- |
-| Mark `localCurrentEpoch` as `volatile` | A volatile write is a *release* store, which does not drain the store buffer. Release orders StoreStore and LoadLoad — **not StoreLoad**. |
-| The `Interlocked.CompareExchange` in `TryAcquireEntry` (`:589`) | A real full barrier, but it runs *before* the announce. Fencing before a store says nothing about that store versus a later load. |
-| `Interlocked.Increment(ref CurrentEpoch)` in `BumpCurrentEpoch` (`:365`) | A real full barrier — on the **reclaimer's** core. Barriers are local. |
-| `drainCount` being `volatile int` (`:135`) | A volatile *read* is acquire. Acquire orders later loads, not an earlier store. |
-
 The rest of this document establishes that this is not merely theoretical: it
 reproduces on real ARM64 and x86-64 hardware ([Results](#results-reproduced-on-arm64-and-x86-64)),
 TLA+ models run on TLC find the exact interleaving
