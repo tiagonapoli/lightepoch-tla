@@ -121,8 +121,8 @@ and the same defect is reachable through the API Tsavorite actually uses
 
 ## Results: reproduced on ARM64 and x86-64
 
-Every number below is from real hardware (Azure VMs and a local workstation),
-running the **unmodified** epoch implementation, with the epoch's own
+Every number below is from real hardware (Azure VMs), running the **unmodified**
+epoch implementation, with the epoch's own
 `BumpCurrentEpoch` → `ComputeNewSafeToReclaimEpoch` → drain logic deciding when to
 free. The harness never frees anything on its own. There are two different patterns of
 using the epoch API, and both are covered: `--pattern bare` (`Resume()` → access →
@@ -133,12 +133,8 @@ using the epoch API, and both are covered: `--pattern bare` (`Resume()` → acce
 
 | Machine | Architecture | CPU | Microarch | Phys cores / LPs | SMT | NUMA nodes |
 |---|---|---|---|---|---|---|
-| Azure `D4ps_v5` | **ARM64** | Ampere Altra | Neoverse-N1 | 4 / 4 | no | 1 |
-| Azure `D4ps_v6` | **ARM64** | Microsoft Cobalt 100 | Neoverse-N2 | 4 / 4 | no | 1 |
 | Azure `D16ps_v5` | **ARM64** | Ampere Altra | Neoverse-N1 | 16 / 16 | no | 1 |
 | Azure `D16ps_v6` | **ARM64** | Microsoft Cobalt 100 | Neoverse-N2 | 16 / 16 | no | 1 |
-| local workstation | **x86-64** | Intel i7-12700K | Alder Lake | 12 / 20 | yes (P-cores) | 1 |
-| Azure `D64s_v4` | **x86-64** | Intel Xeon Platinum 8272CL | Cascade Lake | 32 / 64 | yes | **2** |
 | Azure `D32as_v5` | **x86-64** | AMD EPYC 7763 | Zen 3 | 16 / 32 <sup>a</sup> | yes | 1 |
 | Azure `D64s_v3` | **x86-64** | Intel Xeon Platinum 8171M | Skylake-SP <sup>b</sup> | 32 / 64 | yes | **2** |
 
@@ -167,10 +163,6 @@ and counted as a miss if it survived. That is the last column.
 
 | CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) | `baseline` soak (faults / attempts) |
 |---|---|---|---|---|---|
-| Cobalt 100 / N2 (4) | `bare` | 2 (1 pair) | no fault in 120 s | — | — |
-| Cobalt 100 / N2 (4) | `bare` | 4 (2 pairs) | **FAULT @ 8 s** | — | — |
-| Ampere Altra / N1 (4) | `bare` | 2 (1 pair) | no fault in 120 s | — | — |
-| Ampere Altra / N1 (4) | `bare` | 4 (2 pairs) | no fault in 120 s | — | — |
 | Cobalt 100 / N2 (16) | `bare` | 4 (2 pairs) | **FAULT @ 36 s** | — | — |
 | Cobalt 100 / N2 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — | — |
 | Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | **FAULT @ 7 s** | SURVIVED 300 s | **50 / 51** — 98 % |
@@ -181,20 +173,17 @@ and counted as a miss if it survived. That is the last column.
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s | 6 / 21 — 29 % |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s | 14 / 45 — 31 % *(running)* |
 
-The 4-core and 16-core rows are the same two machines, resized between runs. Soak caps
-were 300 s except for the last row, which used 120 s.
+Soak caps were 300 s except for the last row, which used 120 s.
 
 Concurrency is the dominant factor in how fast the window opens: every extra pair is
 another independent chance per unit time for the reclaimer's scan to run before the
-reader's unfenced announce becomes visible. Three results stand out:
+reader's unfenced announce becomes visible. Two results stand out:
 
 * **`bare` is much harder to reproduce on Neoverse-N1 than on N2.** N2 faults under
-  `bare` in as little as 7 s; N1 did not fault under `bare` in any 120 s run, at
-  either core count or any pair count. Under `resume-and-refresh` — the sequence a
-  real Tsavorite `BasicContext` operation performs — N1 faults readily. These are
-  capped observations, not proof of absence.
-* **N1 at 4 physical cores produced no fault at all**, under either pattern; 16 cores
-  are what make it reproducible.
+  `bare` in as little as 7 s; N1 did not fault under `bare` in any 120 s run, at any
+  pair count. Under `resume-and-refresh` — the sequence a real Tsavorite
+  `BasicContext` operation performs — N1 faults readily. These are capped
+  observations, not proof of absence.
 * **The two parts differ by more than an order of magnitude in how cheap the repro
   is.** N2 reproduces essentially on demand — 50 faults in 51 attempts, about 43
   minutes end to end, fastest fault in 1 s. N1 faults on roughly one attempt in
@@ -226,25 +215,10 @@ destroys the very window under test
 [Appendix A](Draft.md#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
 So instead the `--quarantine` mode is used: a poison value is written into the page
 being reclaimed, which allows a use-after-free to be detected without unmapping
-anything. Counts below are use-after-free **reads** observed:
+anything.
 
-| CPU | Pattern | NUMA placement | Impl | Pairs violating | Violations |
-|---|---|---|---|---|---|
-| i7-12700K (1 node) | `bare` | same node | `baseline` | **5 / 40** | **59** |
-| i7-12700K (1 node) | `bare` | same node | `fullbarrier` | 0 / 40 | 0 |
-| i7-12700K (1 node) | `bare` | same node | `interlocked` | 0 / 40 | 0 |
-| i7-12700K (1 node) | `bare` | same node | `asymmetric` | 0 / 40 | 0 |
-| i7-12700K (1 node) | `resume-and-refresh` | same node | `baseline` | **3 / 40** | **17** |
-| i7-12700K (1 node) | `resume-and-refresh` | same node | `fullbarrier` | 0 / 40 | 0 |
-| Xeon 8272CL (**2 nodes**) | `bare` | **pairs straddle nodes** | `baseline` | **3 / 30** | **6** |
-| Xeon 8272CL (**2 nodes**) | `bare` | single node | `baseline` | **1 / 30** | **4** |
-| Xeon 8272CL (**2 nodes**) | `bare` | pairs straddle nodes | `fullbarrier` | 0 / 30 | 0 |
-| Xeon 8272CL (**2 nodes**) | `bare` | single node | `fullbarrier` | 0 / 30 | 0 |
-
-### x86-64 — widening the window with read-only disturbers
-
-The counts above are small — single-digit to low-tens of violations per run — and the
-historical base rate was roughly one violation per 2.4 billion pair-rounds. That is
+Run that way alone, violations are rare — single-digit to low-tens per run, against a
+historical base rate of roughly one violation per 2.4 billion pair-rounds. That is
 not merely bad luck; the window is **structurally** narrow on x86, for a reason
 visible in the implementation:
 
@@ -344,21 +318,20 @@ An earlier run of the same configuration had `resume-and-refresh` ahead of `bare
 * The unfenced announce is **incorrect on both architectures**, matching the TLA+
   result (`X86TSO` with no fence is **VIOLATED**; ARM64 is weaker than TSO, so the
   same window is open there too).
-* **Every fix was clean under the conditions that broke the baseline.**
+* **The fix was clean under every condition that broke the baseline.**
   `fullbarrier` was run on every machine and every configuration in the tables above
-  and never faulted or violated; `interlocked` and `asymmetric` were additionally
-  clean across all x86-64 quarantine runs. The buggy build failed on both
-  architectures under exactly the same conditions.
+  and never faulted or violated, including while entering the race window more often
+  than the baseline did. The buggy build failed on both architectures under exactly
+  the same conditions.
 * **The failure is repeatable, not a one-off.** 50 independent faults were collected
   back to back on Neoverse-N2, at a 98 % hit rate. On x86-64, read-only disturbers
   make the window wide enough to produce 3,739 violations across two vendors in about
   22 minutes, spread evenly through every run, against 0 for the fenced build.
 * **How easily it reproduces varies enormously by microarchitecture and workload
   shape.** Neoverse-N2 faults under the minimal `bare` sequence within seconds, and
-  under `resume-and-refresh` too. Neoverse-N1 produced no fault at 4 physical cores
-  at all, and at 16 cores reproduces only under the Tsavorite-like
-  `resume-and-refresh` sequence, never under `bare`. A clean run on one ARM64 part
-  therefore says nothing about another.
+  under `resume-and-refresh` too. Neoverse-N1 never faulted under `bare` at any pair
+  count, and reproduces only under the Tsavorite-like `resume-and-refresh` sequence.
+  A clean run on one ARM64 part therefore says nothing about another.
 
 ---
 
