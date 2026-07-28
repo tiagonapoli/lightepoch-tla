@@ -208,53 +208,35 @@ System.AccessViolationException: Attempted to read or write protected memory.
 
 ### x86-64 — logical use-after-free detection
 
-x86 needs a different detection mechanism, because the memory unmap used on ARM64
-forces a TLB-shootdown IPI that introduces a memory barrier on the reader and
-destroys the very window under test
-(the full explanation is
-[Appendix A](Draft.md#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
-So instead the `--quarantine` mode is used: a poison value is written into the page
-being reclaimed, which allows a use-after-free to be detected without unmapping
-anything.
+The ARM64 unmap trick cannot work here: the unmap forces a TLB-shootdown IPI, which
+fences the reader and destroys the window under test
+([Appendix A](Draft.md#appendix-a-why-the-unmap-based-repro-cannot-fault-on-x86-tlb-shootdown)).
+So `--quarantine` mode writes a poison value into the reclaimed page instead,
+detecting the use-after-free without unmapping anything.
 
-Run that way alone, violations are rare — single-digit to low-tens per run, against a
-historical base rate of roughly one violation per 2.4 billion pair-rounds. That is
-not merely bad luck; the window is **structurally** narrow on x86, for a reason
-visible in the implementation:
+Run plainly, violations are rare — historically about one per 2.4 billion pair-rounds
+— and the reason is structural, not bad luck. `Acquire()` announces via
+`TryAcquireEntry()`, whose `Interlocked.CompareExchange` targets `Entry.threadId` at
+`[FieldOffset(8)]` — the **same 64-byte cache line** as `localCurrentEpoch` at
+`[FieldOffset(0)]`. That `lock cmpxchg` both fences and takes the line exclusive, so
+the announce a few lines later retires almost immediately and the reclaimer never
+scans in between. Delaying the reclaimer does not help either: it pushes the "reader
+saw a stale `curPage`" rate from 3 % to 100 % with violations still at zero, because
+the same delay postpones the scan.
 
-`Acquire()` reaches the announce via `TryAcquireEntry()`, which does an
-`Interlocked.CompareExchange` on `Entry.threadId` at `[FieldOffset(8)]`.
-`localCurrentEpoch` sits at `[FieldOffset(0)]` — the **same 64-byte cache line**.
-That `lock cmpxchg` is both a full fence and an RFO, so by the time the announce
-store executes a few lines later, the line is already held exclusive and the store
-retires from the store buffer almost immediately. The reclaimer never gets a chance
-to scan in between.
+What works is **read-only disturber threads** that only read the epoch table. Reads
+cannot change an epoch decision, so this cannot manufacture a false positive, but
+they keep the announce line shared — the announce must now win an RFO, and since x86
+store buffers drain in order it stays pending long enough to be observable. The
+implementation under test is untouched; only cache-line state and timing change.
 
-Simply delaying the reclaimer does not help: it drives the "reader observed a stale
-`curPage`" rate from 3 % to 100 % while leaving violations at zero, because delaying
-the unlink delays the scan by the same amount. The two required conditions are
-anti-correlated.
+Two placement rules matter: disturbers must sit on **distinct physical cores** (SMT
+siblings share L1 and generate no coherence traffic — packing them there collapsed
+violations from thousands to zero), and the count is a **resonance, not a monotonic
+knob** (on the EPYC: 4 → 0 violations, 8 → 27, 10 → 4,515, 12 → 2).
 
-What does work is adding **read-only disturber threads** that do nothing but read the
-epoch table. Reads cannot change any epoch decision, so this is semantically inert
-and cannot manufacture a false positive — but it keeps the announce line in shared
-state, forcing the announce to win an RFO before it can commit. Because x86 store
-buffers drain in order, the announce stays pending long enough for the missing
-StoreLoad fence to become observable. This is standard litmus-test methodology: the
-implementation under test is untouched, and only cache-line state and timing are
-perturbed.
-
-Two placement rules matter, and both are easy to get wrong:
-
-* **Disturbers must sit on distinct physical cores.** Packing them onto SMT siblings
-  collapsed violations from thousands to **zero** — siblings share L1, so their reads
-  generate no coherence traffic at all.
-* **Disturber count is a resonance, not a monotonic knob.** On the EPYC, 4 disturbers
-  gave 0 violations, 8 gave 27, and 10 gave 4,515; 12 dropped back to 2.
-
-With up to 10 disturbers per pair on distinct physical cores (2 pairs on the EPYC, 3
-cross-socket pairs on the Xeon), and readers and reclaimers placed across the
-highest-latency boundary on each machine:
+With up to 10 disturbers per pair, and each pair's reader and reclaimer straddling
+the highest-latency boundary on its machine:
 
 | CPU | Pattern | Impl | Violations | Rounds | Exec time | Violations / 1M rounds |
 |---|---|---|---|---|---|---|
@@ -268,8 +250,14 @@ highest-latency boundary on each machine:
 | Xeon 8171M | `resume-and-refresh` | `fullbarrier` | 0 | 60,000,000 | ~165 s <sup>†</sup> | 0 |
 | | | **total** | **3,739 / 0** | 410,000,000 | ~22 min | |
 
-Exact thread placement, since the result depends on it (24 of 32 LPs on the EPYC, 32
-of 64 on the Xeon):
+`Rounds` is rounds-per-pair × pairs × waves, per impl. Compare rows using the last
+column; raw totals depend on how many waves fit the time budget.
+
+<sup>†</sup> Xeon per-impl times are **derived, not measured** — only per-pattern wall
+clock was recorded (348 s `bare`, 331 s `resume-and-refresh`), split evenly.
+
+The exact placement, since the result depends on it (24 of 32 LPs on the EPYC, 32 of
+64 on the Xeon; every disturber on its own physical core):
 
 ```
 EPYC 7763   readers and reclaimers straddle the LP 0-15 / LP 16-31 latency boundary
@@ -282,36 +270,21 @@ Xeon 8171M  socket 0 = LP 0-31, socket 1 = LP 32-63, so every pair straddles soc
   pair 2    reclaimer LP 24  reader LP 56   disturbers 26,28,30,58,60,62
 ```
 
-Each pair's reader and reclaimer sit on separate physical cores on opposite sides of
-the highest-latency boundary, and every disturber gets its own physical core. The two
-EPYC pairs interleave by taking opposite SMT siblings of the same physical cores —
-they read different epoch tables, so both still generate coherence traffic.
-
-`Rounds` is rounds-per-pair × pairs × waves, counted separately for each impl (EPYC 2
-pairs, Xeon 3 pairs, 5,000,000 rounds per pair per wave). Compare rows using the
-last column; raw totals depend on how many waves fit the time budget.
-
-<sup>†</sup> The Xeon per-impl times are **derived, not measured** — only per-pattern
-wall clock was recorded there, split evenly between the two impls. The measured
-per-pattern totals are 348 s (`bare`) and 331 s (`resume-and-refresh`).
-
 This raises the hit rate by more than four orders of magnitude, and the violations
-are **sustained rather than front-loaded**: all 17 baseline waves produced violations
-(weakest 60, strongest 603), and a per-run decile histogram is flat in every wave on
-both machines — for example `[74 61 53 70 58 59 42 71 61 54]` on the EPYC and
-`[11 13 10 7 14 8 11 14 14 12]` on the Xeon. Several trend upward toward the end, so
-this is not a warm-up or first-touch artifact.
+are **sustained, not front-loaded**: all 17 baseline waves produced violations
+(weakest 60, strongest 603), with a flat per-run decile histogram in every wave —
+`[74 61 53 70 58 59 42 71 61 54]` on the EPYC, `[11 13 10 7 14 8 11 14 14 12]` on the
+Xeon — several trending upward toward the end.
 
-The control is what makes the result meaningful: `fullbarrier` recorded **0
-violations across 13.7 million sampled race-window rounds**, while consistently
-*entering* the window more often than the baseline did — on the Xeon, 2,104,411
-sampled rounds versus the baseline's 1,400,545. The fenced build visits the dangerous
-interleaving more frequently and still never corrupts, which isolates the missing
-fence rather than any property of the harness.
+The control is what makes this meaningful: `fullbarrier` recorded **0 violations
+across 13.7 million sampled race-window rounds**, while *entering* the window more
+often than the baseline (on the Xeon, 2,104,411 sampled rounds against 1,400,545). It
+visits the dangerous interleaving more and never corrupts, which isolates the missing
+fence from any property of the harness.
 
-One caveat on reading these numbers: which pattern reproduces *better* is not stable.
-An earlier run of the same configuration had `resume-and-refresh` ahead of `bare` by
-2.4× on the EPYC; here the order reverses. Treat the pattern gap as run-to-run noise.
+Which *pattern* reproduces better is not stable — an earlier run had
+`resume-and-refresh` ahead of `bare` by 2.4× on the EPYC, and here the order
+reverses. Treat that gap as run-to-run noise.
 
 ### What this establishes
 
