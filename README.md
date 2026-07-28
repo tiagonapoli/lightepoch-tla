@@ -163,11 +163,11 @@ fault.
 
 | CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) |
 |---|---|---|---|---|
-| Cobalt 100 / N2 (16) | `bare` | 4 (2 pairs) | **FAULT @ 36 s** | — |
+| Cobalt 100 / N2 (16) | `bare` | 4 (2 pairs) | **FAULT @ 36 s** | SURVIVED 300 s |
 | Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | **FAULT @ 7 s** | SURVIVED 300 s |
-| Cobalt 100 / N2 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 73 s** | — |
-| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | **FAULT @ 26 s** *(1 / 4 runs)* | — |
-| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | **FAULT @ 38 s** *(5 / 16 runs)* | — |
+| Cobalt 100 / N2 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 73 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | **FAULT @ 26 s** *(1 / 4 runs)* | SURVIVED 300 s |
+| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | **FAULT @ 38 s** *(5 / 16 runs)* | SURVIVED 300 s |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s |
 | Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s |
 
