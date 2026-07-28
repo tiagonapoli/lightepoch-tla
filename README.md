@@ -273,7 +273,6 @@ the machine:
 
 * `--pairs N` — runs N reader-reclaimer pairs concurrently on 2N distinct physical cores.
 * `--seed S` — shuffles which cores are used.
-* `--cross-numa` — forces the reclaimer and the reader of each pair onto **different NUMA nodes**.
 
 ### ARM64 method — detection by real memory unmapping
 
@@ -285,8 +284,7 @@ the machine:
 * If a reader is still dereferencing that page, the addresses are no longer mapped
   and the CPU raises `0xC0000005`, terminating the process.
 * **Verdict:** process exit code. Zero = survived; an access violation = the epoch
-  freed memory a protected reader was reading. There is no heuristic and nothing to
-  tune — the hardware decides.
+  freed memory a protected reader was reading.
 * Implemented in `Litmus<TOps, TPattern>`. This is the default mode.
 
 ### x86-64 method — quarantine, logical verdict
@@ -309,9 +307,6 @@ So the x86 mode keeps the kernel out of the loop entirely:
 * Implemented in `QuarantineLitmus<TOps, TPattern>` (`--quarantine`), a **separate**
   class; the ARM64 unmap path is untouched.
 
-Because this verdict is software rather than hardware, the detector itself is
-validated with `--self-test` — see [Appendix A.7](Draft.md#a7-validating-the-detector).
-
 ### Reproducing the numbers
 
 Build once on Windows with a .NET 10 SDK:
@@ -333,9 +328,6 @@ dotnet LightEpoch.Repro.dll --pattern resume-and-refresh --impl baseline --pairs
 # x86-64 - logical detection. "USE-AFTER-FREE" on stderr = bug reproduced.
 dotnet LightEpoch.Repro.dll --impl baseline    --pairs 5 --rounds 8000000 --quarantine
 dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 5 --rounds 8000000 --quarantine
-
-# x86-64, multi-socket: force each pair's reader and reclaimer onto different NUMA nodes
-dotnet LightEpoch.Repro.dll --impl baseline --pairs 8 --rounds 8000000 --quarantine --cross-numa
 
 # Detector self-test - MUST report violations, otherwise --quarantine results are meaningless
 dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 1 --rounds 200000 --self-test
