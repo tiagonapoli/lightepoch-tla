@@ -1,8 +1,7 @@
 # LightEpoch memory-ordering study: missing StoreLoad fence
 
 This repository is a self-contained, reproducible study of a **memory-ordering
-bug in an epoch-based safe-memory-reclamation (SMR) scheme** called
-`LightEpoch`. The epoch *enter* (announce) path publishes a thread's current
+bug in an epoch-based safe-memory-reclamation scheme**. The epoch *enter* (announce) path publishes a thread's current
 epoch with a **plain store and no StoreLoad fence**. This lets the reclaimer's
 "safe-to-reclaim" scan miss a live reader and free memory that the reader is about
 to dereference. This happens reliably on a weakly-ordered CPU (**ARM64**), and more
@@ -13,7 +12,8 @@ The bug is demonstrated in two complementary ways:
 1. **A running C# repro** (`src/`) that links the epoch implementation
    unmodified and lets the epoch machinery *itself* free the object. On real
    Windows ARM64 the buggy build faults within seconds, while the fixed builds run
-   indefinitely. On x86-64 the buggy build also reproduces, in a smaller window
+   indefinitely. On x86-64 the buggy build also reproduces, while the build with the
+   memory barrier runs without violations
    (see [Results](#results-reproduced-on-arm64-and-x86-64) below).
 2. **Formal TLA+ models** (`tla/`) of the x86-TSO (total store order) memory model, and
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
@@ -29,15 +29,14 @@ The bug is demonstrated in two complementary ways:
 
 Epoch-based reclamation rests on one agreement between two threads:
 
-> A reader **announces** its epoch before touching anything. A reclaimer **scans**
-> every announced epoch before freeing anything. If the reader announced before the
-> reclaimer scanned, the reclaimer must see it.
+> If a reader has **announced** epoch `E`, then a reclaimer **must see** that
+> announcement, and must not reclaim anything retired in epoch `E` or later.
 
-That last sentence is the part the hardware does not give you for free. It requires
-the reader's announce *store* to be globally visible before the reader's first
-*load* of the object — and "store, then load" is exactly the one ordering that
-**both x86-TSO and ARM64 are allowed to reorder**. Preventing it needs an explicit
-**StoreLoad** fence. `LightEpoch` has none.
+That is the part the hardware does not give you for free. It requires the reader's
+announce *store* to be globally visible before the reader's first *load* of the
+object — and "store, then load" is exactly the one ordering that **both x86-TSO and
+ARM64 are allowed to reorder**. Preventing it needs an explicit **StoreLoad** fence,
+which is missing in `LightEpoch`.
 
 ### The reader side — announces with a plain store
 
@@ -46,25 +45,22 @@ the reader's announce *store* to be globally visible before the reader's first
 // (ProtectAndDrain() at :304 has the identical unfenced announce.)
 
 // Reserve an entry in the epoch table for this thread
-ReserveEntryForThread(ref entry);          // CAS -- a full barrier, but it happens
-                                           // BEFORE the announce, so it orders nothing
-                                           // between the announce and the load below.
+ReserveEntryForThread(ref entry);
 
 // Protect CurrentEpoch by copying it to the instance-specific epoch table
 // so that ComputeNewSafeToReclaimEpoch() will see it.
 (*(tableAligned + entry)).localCurrentEpoch = CurrentEpoch;
 
 // >>> MISSING: Interlocked.MemoryBarrier();  <<<
-// Without it this plain store may sit in THIS core's store buffer while the
-// thread races ahead into the critical section. `localCurrentEpoch` is a plain
-// `public long` field at [FieldOffset(0)] -- not volatile, written through a raw
-// pointer -- so nothing forces it out. Store forwarding means the reader still
-// reads `1` back from its own slot, so it cannot detect its own invisibility.
+// Without it this store may sit in THIS core's store buffer while the thread
+// races ahead into the critical section, so other cores keep reading the slot
+// as 0. Store forwarding means the reader reads back the value it just wrote,
+// so it cannot detect its own invisibility.
 
 // ... caller now dereferences the object it believes it has protected.
 ```
 
-### The reclaimer side — scans, and treats "not yet visible" as "not there"
+### The reclaimer side — scans without synchronizing with the reader
 
 ```cs
 // LightEpoch.cs:453  --  ComputeNewSafeToReclaimEpoch()
@@ -75,12 +71,14 @@ long ComputeNewSafeToReclaimEpoch(long currentEpoch)
 
     for (var index = 1; index <= kTableSize; index++)
     {
+        // >>> NOTHING SYNCHRONIZES THIS LOAD WITH THE READER'S ANNOUNCE <<<
+        // The reader never flushed its store buffer and this thread never
+        // established any ordering against it, so this load can still return the
+        // pre-announce value. The delayed announce reads as 0, which is also how
+        // a genuinely free slot reads, so the live reader is skipped below and
+        // does not hold the safe epoch back.
         var entry_epoch = (*(tableAligned + index)).localCurrentEpoch;
 
-        // >>> THE FATAL AMBIGUITY <<<
-        // 0 means "this slot is free". A slot whose announce is still buffered on
-        // another core ALSO reads 0. The scan cannot tell the two apart, so a live
-        // reader is silently skipped and does not hold the safe epoch back.
         if (0 != entry_epoch)
         {
             if (entry_epoch < oldestOngoingCall)
@@ -95,22 +93,27 @@ long ComputeNewSafeToReclaimEpoch(long currentEpoch)
 }
 ```
 
-Note that a fence *here* cannot help. A barrier only drains the buffer of the core
-that executes it; the reclaimer has no way to reach into the reader's store buffer.
-**The fix must be on the reader's core**, between the announce and the first load.
+Note that an ordinary fence *here* cannot help. A barrier only drains the buffer of
+the core that executes it, and the reclaimer has no way to reach into the reader's
+store buffer — unless it uses an **asymmetric barrier**, a process-wide primitive
+that forces every other core to drain
+([`FlushProcessWriteBuffers`](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-flushprocesswritebuffers)
+on Windows, `sys_membarrier` on Linux). Short of that,
+**the fix must be on the reader's core**, between the announce and the first load.
 
 ### Why the obvious candidates don't close it
 
 | Candidate | Why it fails |
 | --- | --- |
-| Mark `localCurrentEpoch` as `volatile` | A volatile write is a *release* store. On x86 plain stores are already release. Release orders StoreStore and LoadLoad — **not StoreLoad**. |
+| Mark `localCurrentEpoch` as `volatile` | A volatile write is a *release* store, which does not drain the store buffer. Release orders StoreStore and LoadLoad — **not StoreLoad**. |
 | The `Interlocked.CompareExchange` in `TryAcquireEntry` (`:589`) | A real full barrier, but it runs *before* the announce. Fencing before a store says nothing about that store versus a later load. |
 | `Interlocked.Increment(ref CurrentEpoch)` in `BumpCurrentEpoch` (`:365`) | A real full barrier — on the **reclaimer's** core. Barriers are local. |
 | `drainCount` being `volatile int` (`:135`) | A volatile *read* is acquire. Acquire orders later loads, not an earlier store. |
 
 The rest of this document establishes that this is not merely theoretical: it
 reproduces on real ARM64 and x86-64 hardware ([Results](#results-reproduced-on-arm64-and-x86-64)),
-TLC finds the exact interleaving ([Corner case](#corner-case-the-exact-interleaving-step-by-step)),
+TLA+ models run on TLC find the exact interleaving
+([Corner case](#corner-case-the-exact-interleaving-step-by-step)),
 and the same defect is reachable through the API Tsavorite actually uses
 ([§8](Draft.md#8-how-tsavorite-actually-uses-lightepoch)).
 
