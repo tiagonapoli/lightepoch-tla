@@ -636,10 +636,5 @@ memory is released.
 | [`tla/epoch/LightEpochResumeAndRefresh.tla`](tla/epoch/LightEpochResumeAndRefresh.tla) | Tsavorite's per-operation sequence. **VIOLATED.** |
 | [`tla/epoch/fixes/`](tla/epoch/fixes) | The same two specs with the barrier added. **HOLD.** |
 
-Each **epoch** spec is checked under both memory models defined in `StoreBuffer.tla`:
-`tso` (x86, FIFO store-buffer drain, only StoreLoad relaxed) and `arm` (additionally
-relaxes StoreStore, so any pending store may drain first). Every `tso` behaviour is
-also an `arm` behaviour, so VIOLATED under `tso` implies VIOLATED under `arm`, and
-HOLDS under `arm` implies HOLDS under `tso`. `X86TSO.tla` is the exception: it is the
-litmus calibration, so it runs under its own `NoFence` and `Fence` configs instead.
+Each epoch spec is built on top of `StoreBuffer.tla`.
 
