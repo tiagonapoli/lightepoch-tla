@@ -286,8 +286,6 @@ namespace LightEpoch.Repro.Common
                 {
                     "baseline" => new QuarantineLitmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
                     "fullbarrier" => new QuarantineLitmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
-                    "interlocked" => new QuarantineLitmus<InterlockedExchangeOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
-                    "asymmetric" => new QuarantineLitmus<AsymmetricOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest).Run(),
                     _ => UnknownImplementation(impl),
                 };
             }
@@ -296,8 +294,6 @@ namespace LightEpoch.Repro.Common
             {
                 "baseline" => new Litmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
                 "fullbarrier" => new Litmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
-                "interlocked" => new Litmus<InterlockedExchangeOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
-                "asymmetric" => new Litmus<AsymmetricOps, TPattern>(rounds, deref, readerCore, reclaimerCore).Run(),
                 _ => UnknownImplementation(impl),
             };
         }
@@ -340,7 +336,7 @@ namespace LightEpoch.Repro.Common
 
         private static int UnknownImplementation(string impl)
         {
-            Console.Error.WriteLine($"unknown --impl '{impl}' (want: baseline|fullbarrier|interlocked|asymmetric)");
+            Console.Error.WriteLine($"unknown --impl '{impl}' (want: baseline|fullbarrier)");
             return 2;
         }
 
@@ -355,7 +351,7 @@ namespace LightEpoch.Repro.Common
             var pattern = new TPattern();
             Console.WriteLine(
                 "usage: LightEpoch.Repro [--pattern <bare|resume-and-refresh>]\n" +
-                "       --impl <baseline|fullbarrier|interlocked|asymmetric>\n" +
+                "       --impl <baseline|fullbarrier>\n" +
                 "       [--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa]\n" +
                 "       [--quarantine] [--self-test]\n" +
                 "       [--reader-core N --reclaimer-core N]   (single pair, manual pinning)\n" +

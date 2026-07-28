@@ -39,26 +39,4 @@ namespace LightEpoch.Core
         public void BumpCurrentEpoch(Action onDrain) => e.BumpCurrentEpoch(onDrain);
         public string Name => "full-barrier (FixedLightEpochWithMemoryBarrier)";
     }
-
-    public readonly struct InterlockedExchangeOps : IEpochOps
-    {
-        private readonly FixedLightEpochWithInterlockedExchange e;
-        public InterlockedExchangeOps() { e = new FixedLightEpochWithInterlockedExchange(); }
-        public void Resume() => e.Resume();
-        public void Refresh() => e.ProtectAndDrain();
-        public void Suspend() => e.Suspend();
-        public void BumpCurrentEpoch(Action onDrain) => e.BumpCurrentEpoch(onDrain);
-        public string Name => "interlocked-exchange announce";
-    }
-
-    public readonly struct AsymmetricOps : IEpochOps
-    {
-        private readonly FixedLightEpochAsymmetricBarrier e;
-        public AsymmetricOps() { e = new FixedLightEpochAsymmetricBarrier(); }
-        public void Resume() => e.Resume();
-        public void Refresh() => e.ProtectAndDrain();
-        public void Suspend() => e.Suspend();
-        public void BumpCurrentEpoch(Action onDrain) => e.BumpCurrentEpoch(onDrain);
-        public string Name => "asymmetric barrier (reclaimer-side)";
-    }
 }

@@ -1,86 +1,98 @@
 -------------------------------- MODULE X86TSO --------------------------------
 (***************************************************************************)
-(* A model of the x86-TSO memory model, exercised with the Store-Buffer    *)
-(* (SB) litmus — the exact shape of the LightEpoch enter-path bug.          *)
+(* Calibration of MODULE StoreBuffer against the canonical Store-Buffer     *)
+(* (SB) litmus test — the exact shape of the LightEpoch enter-path bug.     *)
 (*                                                                         *)
 (*   Thread t1:  store x := 1 ; [fence?] ; load r1 := y                     *)
 (*   Thread t2:  store y := 1 ; [fence?] ; load r2 := x                     *)
 (*                                                                         *)
-(* x86-TSO (Owens/Sewell/Sarkar): each core has a private FIFO store        *)
-(* buffer. A store enters the buffer and drains to shared memory in FIFO    *)
-(* order; a load reads the newest matching entry in its own buffer (store   *)
+(* WHY THIS SPEC EXISTS                                                    *)
+(*                                                                         *)
+(* The epoch specs all sit on the shared harness in MODULE StoreBuffer, so  *)
+(* every claim they make inherits that harness's assumptions. If the        *)
+(* harness were too WEAK, the epoch bug would be a modelling artifact; if   *)
+(* it were too STRONG, the fixes would look sound for the wrong reason.     *)
+(* Neither failure is visible from inside the epoch specs.                  *)
+(*                                                                         *)
+(* This spec pins the harness to a published, independently known result.   *)
+(* SB is the textbook x86-TSO litmus (Owens/Sewell/Sarkar, "A Better x86    *)
+(* Memory Model: x86-TSO"): r1 = r2 = 0 is architecturally ALLOWED without  *)
+(* a fence and FORBIDDEN with one. Reproducing exactly that outcome — no    *)
+(* more, no less — is what licenses the epoch results. It deliberately      *)
+(* instantiates StoreBuffer rather than restating it, so it tests the same  *)
+(* operators the epoch specs run on.                                       *)
+(*                                                                         *)
+(* x86-TSO (Model = "tso"): each core has a private FIFO store buffer. A    *)
+(* store enters the buffer and drains to shared memory in FIFO order; a     *)
+(* load reads the newest matching entry in its own buffer (store            *)
 (* forwarding) else shared memory. The ONLY reordering this permits is      *)
 (* StoreLoad: a core's own later load can execute while its earlier store   *)
 (* is still buffered. That is exactly — and only — the reordering the epoch *)
 (* announce bug needs.                                                     *)
 (*                                                                         *)
 (* Fenced = FALSE : no barrier -> SequentiallyConsistent is VIOLATED        *)
-(*                  (both loads may read 0). This is the StoreLoad window.   *)
-(* Fenced = TRUE  : an MFENCE (== Interlocked.MemoryBarrier) between store   *)
-(*                  and load drains the buffer first -> SC HOLDS.            *)
+(*                  (both loads may read 0). This is the StoreLoad window.  *)
+(* Fenced = TRUE  : an MFENCE (== Interlocked.MemoryBarrier) between store  *)
+(*                  and load drains the buffer first -> SC HOLDS.           *)
 (*                                                                         *)
-(* Note: an x86 RELEASE store is just a plain store (TSO stores already have *)
-(* release semantics), and it does NOT order StoreLoad — only MFENCE (or a   *)
-(* LOCKed RMW) does. That is why "make it volatile" does not fix the bug.    *)
+(* Note: an x86 RELEASE store is just a plain store (TSO stores already     *)
+(* have release semantics), and it does NOT order StoreLoad — only MFENCE   *)
+(* (or a LOCKed RMW) does. That is why "make it volatile" does not fix the  *)
+(* bug.                                                                    *)
 (***************************************************************************)
 EXTENDS Integers, Sequences
 
 CONSTANT Fenced         \* TRUE => an MFENCE sits between each store and load
+CONSTANT Model          \* "tso" | "arm" -- see MODULE StoreBuffer
 
 T1 == "t1"
 T2 == "t2"
 Procs == {T1, T2}
 
-VARIABLES buf, mem, r1, r2, pc
-vars == <<buf, mem, r1, r2, pc>>
+VARIABLES mem, sb, r1, r2, pc
+vars == <<mem, sb, r1, r2, pc>>
 
-Max(S) == CHOOSE x \in S : \A y \in S : y <= x
+\* Implicit substitution: this module declares mem and sb, so the shared
+\* harness binds to them directly.
+SB == INSTANCE StoreBuffer
 
-\* Store forwarding: newest buffered write to f in p's buffer, else memory.
-Load(p, f) ==
-    LET idxs == { i \in DOMAIN buf[p] : buf[p][i].f = f }
-    IN  IF idxs = {} THEN mem[f] ELSE buf[p][Max(idxs)].v
-
-OtherVar(p) == IF p = T1 THEN "y" ELSE "x"
 OwnVar(p)   == IF p = T1 THEN "x" ELSE "y"
+OtherVar(p) == IF p = T1 THEN "y" ELSE "x"
 
 Init ==
-    /\ buf = [p \in Procs |-> <<>>]
     /\ mem = [x |-> 0, y |-> 0]
+    /\ sb = [p \in Procs |-> <<>>]
     /\ r1 = -1
     /\ r2 = -1
     /\ pc = [p \in Procs |-> "store"]
 
-\* FIFO drain: the head of a core's store buffer becomes globally visible.
-Flush(p) ==
-    /\ buf[p] # <<>>
-    /\ mem' = [mem EXCEPT ![Head(buf[p]).f] = Head(buf[p]).v]
-    /\ buf' = [buf EXCEPT ![p] = Tail(buf[p])]
-    /\ UNCHANGED <<r1, r2, pc>>
+\* Asynchronous propagation of one pending store.
+FlushOne(p) == SB!FlushOne(p) /\ UNCHANGED <<r1, r2, pc>>
 
 DoStore(p) ==
     /\ pc[p] = "store"
-    /\ buf' = [buf EXCEPT ![p] = Append(buf[p], [f |-> OwnVar(p), v |-> 1])]
+    /\ sb' = SB!Buffer(p, OwnVar(p), 1)
     /\ pc' = [pc EXCEPT ![p] = IF Fenced THEN "fence" ELSE "load"]
     /\ UNCHANGED <<mem, r1, r2>>
 
-\* MFENCE: cannot proceed until this core's store buffer is fully drained.
+\* MFENCE: everything this core has pending becomes globally visible at once.
 DoFence(p) ==
     /\ pc[p] = "fence"
-    /\ buf[p] = <<>>
+    /\ mem' = SB!Fenced(p)
+    /\ sb' = SB!Drained(p)
     /\ pc' = [pc EXCEPT ![p] = "load"]
-    /\ UNCHANGED <<buf, mem, r1, r2>>
+    /\ UNCHANGED <<r1, r2>>
 
 DoLoad(p) ==
     /\ pc[p] = "load"
-    /\ LET v == Load(p, OtherVar(p))
+    /\ LET v == SB!Load(p, OtherVar(p))
        IN IF p = T1 THEN r1' = v /\ UNCHANGED r2
                     ELSE r2' = v /\ UNCHANGED r1
     /\ pc' = [pc EXCEPT ![p] = "done"]
-    /\ UNCHANGED <<buf, mem>>
+    /\ UNCHANGED <<mem, sb>>
 
 Next ==
-    \/ \E p \in Procs : DoStore(p) \/ DoFence(p) \/ DoLoad(p) \/ Flush(p)
+    \/ \E p \in Procs : DoStore(p) \/ DoFence(p) \/ DoLoad(p) \/ FlushOne(p)
 
 Spec == Init /\ [][Next]_vars
 

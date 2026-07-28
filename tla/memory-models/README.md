@@ -1,17 +1,17 @@
 # Memory-model litmus tests
 
-This directory contains small, executable TLA+ models used to explain one
+This directory contains a small, executable TLA+ model used to explain one
 specific ordering problem: a processor stores an announcement and then loads
 shared data, while another processor stores an update and then loads that
 announcement.
 
-The models answer a deliberately narrow question:
+The model answers a deliberately narrow question:
 
 > Can both processors perform their store, continue to their load, and still
 > read the old value written by the other processor?
 
-They are didactic **Store-Buffering (SB) litmus tests**, not complete
-formalizations of either architecture. Their value comes from reducing the
+It is a didactic **Store-Buffering (SB) litmus test**, not a complete
+formalization of the architecture. Its value comes from reducing the
 LightEpoch race to the smallest execution that still contains the relevant
 StoreLoad ordering.
 
@@ -21,7 +21,7 @@ StoreLoad ordering.
 - [The four memory-order pairs](#the-four-memory-order-pairs)
   - [Why StoreLoad matters to LightEpoch](#why-storeload-matters-to-lightepoch)
   - [Architecture and compiler differences](#architecture-and-compiler-differences)
-- [Shared TLA+ representation](#shared-tla-representation)
+- [TLA+ representation](#tla-representation)
   - [Store forwarding](#store-forwarding)
   - [Asynchronous propagation](#asynchronous-propagation)
 - [x86-TSO](#x86-tso)
@@ -35,14 +35,6 @@ StoreLoad ordering.
   - [Locked read-modify-write operations](#locked-read-modify-write-operations)
   - [Why a release store is insufficient](#why-a-release-store-is-insufficient)
   - [Scope of the x86 model](#scope-of-the-x86-model)
-- [ARM64](#arm64)
-  - [Non-FIFO propagation abstraction](#non-fifo-propagation-abstraction)
-  - [Plain store](#plain-store)
-  - [Release store (`STLR`)](#release-store-stlr)
-  - [Full barrier (`DMB ISH`)](#full-barrier-dmb-ish)
-  - [Multi-copy atomicity](#multi-copy-atomicity)
-  - [Dependencies and barrier variants](#dependencies-and-barrier-variants)
-  - [Scope of the ARM model](#scope-of-the-arm-model)
 - [Connection to LightEpoch](#connection-to-lightepoch)
 - [Running the models](#running-the-models)
 - [Appendix: asymmetric barriers in RCU, GCs, and runtimes](#appendix-asymmetric-barriers-in-rcu-gcs-and-runtimes)
@@ -57,7 +49,7 @@ StoreLoad ordering.
 
 ## The common Store-Buffering test
 
-Both modules execute the same program, starting with `x = 0` and `y = 0`:
+The module executes the following program, starting with `x = 0` and `y = 0`:
 
 | Processor `t1` | Processor `t2` |
 |---|---|
@@ -85,7 +77,7 @@ executing before that store is visible to other processors. Its own subsequent
 load can therefore pass the buffered store when the load addresses a different
 location.
 
-The invariant named `SequentiallyConsistent` in these modules checks only this
+The invariant named `SequentiallyConsistent` in this module checks only this
 one SC-forbidden outcome:
 
 ```tla
@@ -163,9 +155,9 @@ provide both:
 2. **hardware ordering**, through primitives whose generated instructions
    provide the required architectural guarantee.
 
-## Shared TLA+ representation
+## TLA+ representation
 
-The two modules use the same principal state variables:
+The module uses these principal state variables:
 
 | Variable | Meaning |
 |---|---|
@@ -186,7 +178,7 @@ both program counters at `"store"`.
 
 ### Store forwarding
 
-Both modules define loads as follows:
+Loads are defined as follows:
 
 ```tla
 Load(p, f) ==
@@ -517,157 +509,6 @@ operation. In particular, it does not cover:
 These omissions do not affect the SB result for the ordinary field accesses
 modeled here.
 
-## ARM64
-
-The ARM module is [`ARM64.tla`](ARM64.tla). It intentionally provides a more
-permissive operational abstraction than `X86TSO.tla` and uses the same SB
-program to compare three cases:
-
-| `Barrier` | Modeled source operation | Expected result |
-|---|---|---|
-| `"none"` | plain store, then load | `0/0` reachable |
-| `"release"` | release store, then load | `0/0` reachable |
-| `"full"` | store, full barrier, then load | `0/0` unreachable |
-
-### Non-FIFO propagation abstraction
-
-Unlike the x86 module, ARM's `Flush(p)` may choose any buffered entry:
-
-```tla
-\E i \in DOMAIN buf[p] :
-    /\ mem' = [mem EXCEPT ![buf[p][i].f] = buf[p][i].v]
-    /\ buf' = [buf EXCEPT ![p] =
-        SubSeq(buf[p], 1, i-1) \o
-        SubSeq(buf[p], i+1, Len(buf[p]))]
-```
-
-This allows two stores from one processor to become visible in an order other
-than program order. It is a deliberately simple way to admit StoreStore
-observations that x86-TSO's FIFO buffer excludes.
-
-This should not be read as a literal description of an ARM core's physical
-store buffer. ARM ordering is specified architecturally through permitted
-observations, dependencies, barriers, memory types, and shareability domains.
-The arbitrary-removal buffer is only an over-approximating teaching device for
-the behaviors needed by these examples.
-
-In the current SB test, each processor performs only one store. Therefore,
-choosing an arbitrary buffer entry instead of the FIFO head makes no difference
-to the explored SB outcome. The decisive behavior is still that the later load
-may execute while the earlier store has not propagated.
-
-### Plain store
-
-For `Barrier = "none"`, `DrainsBeforeLoad` is false:
-
-```tla
-DrainsBeforeLoad == Barrier = "full"
-```
-
-After `DoStore`, the processor advances directly to `"load"`. TLC can therefore
-follow the same violating execution as in the unfenced x86 model:
-
-```text
-t1 buffers x := 1
-t2 buffers y := 1
-t1 reads y = 0
-t2 reads x = 0
-```
-
-The model does not need ARM's additional relaxed behaviors to demonstrate the
-problem. Store followed by load to another address is sufficient.
-
-### Release store (`STLR`)
-
-For `Barrier = "release"`, the module intentionally behaves exactly like
-`"none"` for this litmus. This is not claiming that a release store has no
-semantics. It reflects which side of the release store those semantics order.
-
-Release ordering constrains operations **before** the store:
-
-```text
-earlier reads/writes -> STLR
-```
-
-The dangerous load is after the store:
-
-```text
-STLR announcement -> later load of protected data
-```
-
-Because the SB program contains no earlier access whose order matters, adding
-release semantics does not eliminate the `0/0` execution. This is why replacing
-the announcement with a release or volatile write is not a substitute for the
-required StoreLoad barrier.
-
-### Full barrier (`DMB ISH`)
-
-For `Barrier = "full"`, `DoStore` advances to `"barrier"`. `DoBarrier`, like
-the x86 fence action, is enabled only after the local abstract buffer is empty:
-
-```tla
-DoBarrier(p) ==
-    /\ pc[p] = "barrier"
-    /\ buf[p] = <<>>
-    /\ pc' = [pc EXCEPT ![p] = "load"]
-```
-
-This represents the ordering needed from a full `DMB ISH` in the relevant
-inner-shareable domain: the store before the barrier must be ordered before the
-load after it. Both processors can no longer reach their loads while both
-stores remain unpublished, so `0/0` is unreachable.
-
-As with `MFENCE`, "draining the buffer" is an abstract implementation of the
-ordering relation, not a claim about the exact physical mechanism used by every
-ARM processor.
-
-### Multi-copy atomicity
-
-The module has one shared `mem` record. When `Flush` updates `mem`, the new value
-is immediately available to every other processor. The module therefore does
-not represent different observers seeing the same propagated store at
-different times.
-
-This detail is irrelevant to the two-processor SB outcome, but it matters for
-litmus tests involving multiple observers. Any claim about ARM multi-copy
-atomicity requires a more precise model tied to a particular architecture
-revision and feature set; this module intentionally makes no such claim.
-
-### Dependencies and barrier variants
-
-ARM provides ordering mechanisms that are more nuanced than the single
-`"full"` choice used here, including:
-
-- address, data, and control dependencies;
-- acquire loads and release stores;
-- `DMB` variants with different access classes and shareability domains;
-- `DSB` and `ISB`, which have different purposes;
-- atomic read-modify-write instructions and exclusive loops.
-
-The modeled program has no useful dependency from the announcement store to the
-later load. It specifically needs StoreLoad ordering, so the module compares a
-plain store, a release store, and a full barrier without attempting to encode
-the entire ARM memory model.
-
-### Scope of the ARM model
-
-The ARM module omits:
-
-- per-observer propagation state;
-- formal ARM preserved-program-order and `ob` relations;
-- dependencies;
-- acquire loads;
-- exclusive accesses and atomic RMW semantics;
-- shareability and cacheability domains;
-- memory types and device accesses;
-- mixed-size and unaligned accesses;
-- compiler and .NET JIT transformations;
-- liveness and fairness.
-
-Accordingly, it should be described as an ARM-like operational abstraction of
-the SB and StoreLoad-barrier behavior, rather than a complete executable
-definition of the ARM architecture.
-
 ## Connection to LightEpoch
 
 The SB variables correspond to the relevant LightEpoch operations:
@@ -689,11 +530,11 @@ reclaimer sees reader as absent
 
 That is the LightEpoch analogue of both SB loads reading the old value.
 
-The standalone modules establish that both x86-TSO and the modeled ARM behavior
-allow this StoreLoad window without the required ordering. They do not by
-themselves prove a use-after-free. The larger `LightEpoch*.tla` modules add the
-epoch bump, safety computation, and free/use state needed to turn the ordering
-window into the `NoUseAfterFree` property.
+The standalone module establishes that x86-TSO allows this StoreLoad window
+without the required ordering. It does not by itself prove a use-after-free.
+The larger `LightEpoch*.tla` modules add the epoch bump, safety computation,
+and free/use state needed to turn the ordering window into the
+`NoUseAfterFree` property.
 
 ## Running the models
 
@@ -710,9 +551,6 @@ The memory-model configurations are:
 |---|---|---|
 | `X86TSO` | `X86TSO_NoFence.cfg` | violated |
 | `X86TSO` | `X86TSO_Fence.cfg` | holds |
-| `ARM64` | `ARM64_None.cfg` | violated |
-| `ARM64` | `ARM64_Release.cfg` | violated |
-| `ARM64` | `ARM64_Full.cfg` | holds |
 
 An invariant violation in the unfenced configurations is the expected evidence:
 TLC prints a concrete state trace showing how both loads can read zero. A

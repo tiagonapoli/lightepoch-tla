@@ -15,7 +15,7 @@ The bug is demonstrated in two complementary ways:
    Windows ARM64 the buggy build faults within seconds, while the fixed builds run
    indefinitely. On x86-64 the buggy build also reproduces, in a smaller window
    (see [Results](#results-reproduced-on-arm64-and-x86-64) below).
-2. **Formal TLA+ models** (`tla/`) of the x86-TSO (total store order) and ARM64 memory models, and
+2. **Formal TLA+ models** (`tla/`) of the x86-TSO (total store order) memory model, and
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
    use-after-free in the baseline and proves each fix closes it.
 
@@ -101,7 +101,8 @@ anything. Counts below are use-after-free **reads** observed:
 ### What this establishes
 
 * The unfenced announce is **incorrect on both architectures**, matching the TLA+
-  result (`X86TSO` and `ARM64` with no fence both **VIOLATED**).
+  result (`X86TSO` with no fence is **VIOLATED**; ARM64 is weaker than TSO, so the
+  same window is open there too).
 * **Every fix was clean under the conditions that broke the baseline.**
   `fullbarrier` was run on every machine and every configuration in the tables above
   and never faulted or violated; `interlocked` and `asymmetric` were additionally
@@ -226,6 +227,246 @@ dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 1 --rounds 200000 --self-
 x86 violations are rare, so run the buggy build several times (the counts above are
 totals over 30–40 pair-runs) and always compare against a fixed build over the same
 number of runs.
+
+---
+
+## Corner case: the exact interleaving, step by step
+
+The hardware repro proves the bug *happens*. It cannot show you *why*, because by the
+time the page faults the evidence is gone. The TLA+ model can: TLC explores every
+interleaving of the two threads and every possible moment the store buffer drains, and
+when it finds a violation it prints the shortest path to it.
+
+This section walks through that path. It is the machine-checked answer to the
+question "how can a thread announce that it is inside a critical section, and the
+reclaimer still not see it?"
+
+Reproduce it yourself:
+
+```powershell
+cd tla
+.\run-tests-in-docker.ps1
+```
+
+### The mental model you need first
+
+One idea explains the entire bug:
+
+> **A store does not go to memory. It goes to a queue.**
+
+On modern CPUs each core owns a private FIFO **store buffer**. When a core executes a
+plain store, the value lands in that queue and the core moves on immediately — it does
+not wait for memory. The value becomes visible to *other* cores only later, when the
+buffer drains. Nobody else can see the queue's contents.
+
+This creates an asymmetry that is the crux of the bug:
+
+* The **writing core** reads its own buffer first (*store forwarding*), so it always
+  sees its own latest value. From the inside, the write looks like it happened.
+* **Every other core** still reads the stale value from memory. From the outside, the
+  write has not happened yet.
+
+So the reader thread genuinely believes it announced itself, while the reclaimer
+thread genuinely observes an empty slot. **Both are reading correctly.** No cache is
+"stale" in the sense of a bug; this is architecturally permitted behaviour.
+
+In the trace, that queue is `sb` (one per thread) and memory is `mem`:
+
+| Symbol | Meaning | Production equivalent |
+| --- | --- | --- |
+| `mem.ce` | the global current epoch | `CurrentEpoch` |
+| `mem.lce` | the reader's slot, as **the rest of the machine sees it** | `(*(tableAligned + entry)).localCurrentEpoch` |
+| `mem.ret` | object unlinked / retired | `curPage = 0` |
+| `mem.freed` | object actually freed | the `onDrain` callback ran |
+| `sb[Rd]` | reader's private store queue | the reader core's store buffer |
+| `sb[Rc]` | reclaimer's private store queue | the reclaimer core's store buffer |
+| `holds` | reader is dereferencing the object | inside the critical section |
+
+The safety property is one line — never free while a reader is still inside:
+
+```tla
+NoUseAfterFree == ~ (mem.freed /\ holds)
+```
+
+### The trace
+
+TLC finds the violation in **five steps** (six states, counting the initial one). Watch
+one value: `mem.lce`. It is `0` — "no reader present" — for the entire trace, even
+though the reader announced itself in step 1 and never left.
+
+**Initial state.** Epoch 1 is current, the reader's slot is empty, both queues are
+empty, nothing is retired or freed.
+
+```
+mem = [ce |-> 1, lce |-> 0, ret |-> FALSE, freed |-> FALSE]
+sb  = [Rd |-> <<>>, Rc |-> <<>>]
+```
+
+---
+
+**Step 1 — `Acq`: the reader announces itself. This is the bug.**
+
+The reader reads `CurrentEpoch` (= 1) and writes it into its slot. That write is a
+**plain store**, so it goes into the reader's queue, not to memory
+([`LightEpoch.cs:527`](src/LightEpoch.Implementations/LightEpoch.cs#L527)).
+
+```
+sb  = [Rd |-> <<[f |-> "lce", v |-> 1]>>, Rc |-> <<>>]   ← queued, private to Rd
+mem = [ce |-> 1, lce |-> 0, ...]                          ← memory still says "nobody here"
+```
+
+Note `mem.lce` is still `0`. The reader has announced itself to *itself*. The rest of
+the machine has no idea it exists. **This is the only unordered access in the entire
+program** — everything the reclaimer does is already correctly fenced.
+
+---
+
+**Step 2 — `Cap`: the reader checks the object is still linked, and takes it.**
+
+The reader loads `ret` and sees `FALSE`, so the object looks live. It enters its
+critical section: `holds = TRUE`. From here on, freeing the object is a use-after-free.
+
+```
+holds = TRUE     ← reader is now dereferencing the object
+```
+
+The reader has done everything the API asks of it. It is correctly protected under the
+epoch contract. Everything that follows is the reclaimer failing to notice.
+
+---
+
+**Step 3 — `Retire`: the reclaimer unlinks the object.**
+
+```
+sb = [Rd |-> <<[f |-> "lce", v |-> 1]>>, Rc |-> <<[f |-> "ret", v |-> TRUE]>>]
+```
+
+Both queues now hold one pending store. The reader's announce is still not visible.
+
+---
+
+**Step 4 — `Bump`: the reclaimer increments the epoch — and this fences *its own* buffer.**
+
+`Interlocked.Increment(ref CurrentEpoch)`
+([`LightEpoch.cs:365`](src/LightEpoch.Implementations/LightEpoch.cs#L365)) is a locked
+RMW, which is a **full barrier**. The reclaimer's queue drains completely: `ret` is now
+visible in memory, and the epoch advances to 2. The retire is tagged with epoch 1.
+
+```
+mem = [ce |-> 2, lce |-> 0, ret |-> TRUE, freed |-> FALSE]
+sb  = [Rd |-> <<[f |-> "lce", v |-> 1]>>, Rc |-> <<>>]   ← Rc drained; Rd's announce STILL queued
+```
+
+This step is the one most people expect to save them, and it is worth being precise
+about why it does not. A barrier is **local to the core that executes it**. It flushes
+the *reclaimer's* store buffer. It has no power to reach into the *reader's* store
+buffer and flush that. The reader's announce is still sitting in a queue that only the
+reader can see.
+
+---
+
+**Step 5 — `Compute`: the reclaimer scans the slots and frees the object.**
+
+`ComputeNewSafeToReclaimEpoch`
+([`LightEpoch.cs:435`](src/LightEpoch.Implementations/LightEpoch.cs#L435)) walks every
+thread's slot looking for the oldest active epoch, skipping slots that read `0`:
+
+```csharp
+var entry_epoch = (*(tableAligned + index)).localCurrentEpoch;
+if (0 != entry_epoch)                        // ← reader's slot reads 0, so it is SKIPPED
+{
+    if (entry_epoch < oldestOngoingCall)
+        oldestOngoingCall = entry_epoch;
+}
+SafeToReclaimEpoch = oldestOngoingCall - 1;
+```
+
+The reader's slot reads `0`, so the scan skips it and concludes **no thread is
+active**. Therefore `oldestOngoingCall = CurrentEpoch = 2`, and
+`SafeToReclaimEpoch = 1`. The object was retired at epoch 1, and `1 <= 1`, so it is
+safe to free:
+
+```
+mem = [ce |-> 2, lce |-> 0, ret |-> TRUE, freed |-> TRUE]
+holds = TRUE                                  ← reader is STILL dereferencing it
+```
+
+`mem.freed /\ holds` — **`NoUseAfterFree` is violated.** On ARM64 the reader's next
+dereference of that page takes an access violation (`0xC0000005`).
+
+The reader's announce is *still* in its store buffer, unflushed, at the moment the
+memory is released.
+
+### Why it is genuinely hard to see
+
+Three properties conspire to make this bug nearly invisible in review:
+
+1. **The `0` that means "absent" is indistinguishable from the `0` that means "not yet
+   visible."** The scan's `if (0 != entry_epoch)` cannot tell a thread that never
+   entered from a thread whose announce is still queued. A skipped slot and an absent
+   thread look identical.
+2. **Every individual thread is correct in isolation.** The reader announced before
+   entering. The reclaimer bumped the epoch before scanning. Read either thread's code
+   on its own and it is right. The defect exists only in the *ordering relationship
+   between* them, which no single function shows.
+3. **The reader can self-verify and be misled.** Because of store forwarding, if the
+   reader re-reads its own slot it sees `1` — the value it wrote. Any debug assertion
+   the reader makes about its own protection passes. The value is only invisible
+   *from other cores*.
+
+### What actually fixes it, and what does not
+
+The reader must not be allowed to *load* `ret` until its announce *store* is globally
+visible. That specific constraint — no load may float above an earlier store — is a
+**StoreLoad** barrier, the one ordering x86-TSO does **not** give away for free.
+
+This is why the usual instincts fail:
+
+| Attempt | Why it does not work |
+| --- | --- |
+| Mark the field `volatile` | On x86 a release store is *already* a plain store; TSO gives release semantics for free. It orders StoreStore and LoadLoad, **not StoreLoad**. The window is untouched. |
+| "`Interlocked.Increment` is a barrier" | It is — on the **reclaimer's** core. Barriers are local. It cannot drain the reader's buffer (step 4). |
+| "The CAS when acquiring the slot is a barrier" | It is, but it runs *before* the announce store. Fencing before a store says nothing about that store versus a *later* load. |
+| Add a fence in `ComputeNewSafeToReclaimEpoch` | The reclaimer can flush only its own buffer. It cannot pull the reader's queued announce into memory. |
+
+The fix must be on the **reader's** core, between the announce and the first load:
+
+```csharp
+(*(tableAligned + entry)).localCurrentEpoch = CurrentEpoch;
+Interlocked.MemoryBarrier();   // ← drain THIS core's store buffer before any load
+```
+
+With that barrier the reader cannot reach step 2 while its announce is still queued, so
+by the time the reclaimer scans in step 5 the slot reads `1`, the scan computes
+`SafeToReclaimEpoch = 0`, and the retire at epoch 1 is held back. TLC confirms this:
+`FixedLightEpochWithMemoryBarrier` **HOLDS** under both memory models.
+
+### The same trace, in production shape
+
+`LightEpoch.tla` models the bare enter path. Tsavorite does not call it that way — it
+runs `Resume()` → `ProtectAndDrain()` → operation → `Suspend()` per operation, which
+announces at **two** sites
+([`LightEpoch.cs:527`](src/LightEpoch.Implementations/LightEpoch.cs#L527) and
+[`:304`](src/LightEpoch.Implementations/LightEpoch.cs#L304)), both unfenced.
+`LightEpochResumeAndRefresh.tla` models that exact sequence and is **also VIOLATED**,
+which is what carries the result from "a bug in the abstract algorithm" to "a bug
+reachable through the API Tsavorite actually uses."
+
+### Reading the model yourself
+
+| File | What it is |
+| --- | --- |
+| [`tla/StoreBuffer.tla`](tla/StoreBuffer.tla) | The store buffer itself — queuing, store forwarding, drain, barriers. Every spec below shares it. |
+| [`tla/memory-models/X86TSO.tla`](tla/memory-models/X86TSO.tla) | Calibration: reproduces the textbook SB litmus, proving the harness is neither too weak nor too strong. |
+| [`tla/epoch/LightEpoch.tla`](tla/epoch/LightEpoch.tla) | The trace above. **VIOLATED.** |
+| [`tla/epoch/LightEpochResumeAndRefresh.tla`](tla/epoch/LightEpochResumeAndRefresh.tla) | Tsavorite's per-operation sequence. **VIOLATED.** |
+| [`tla/epoch/fixes/`](tla/epoch/fixes) | The same two specs with the barrier added. **HOLD.** |
+
+Each spec is checked under two memory models: `tso` (x86, only StoreLoad relaxed) and
+`arm` (additionally allows a core's stores to become visible out of order). Every TSO
+behaviour is also an ARM behaviour, so a violation under `tso` is the conservative
+result, and the fixes holding under `arm` shows they do not secretly depend on
+FIFO drain order.
 
 ---
 

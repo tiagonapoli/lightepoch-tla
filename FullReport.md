@@ -215,10 +215,10 @@ multi-copy-atomic. Concretely for this bug:
   **sequentially-consistent RMW** (`swpal` / `ldaxr`-`stlxr`, what
   `Interlocked.Exchange` emits) drains the buffer before the load.
 
-TLA+ model: [`tla/memory-models/ARM64.tla`](tla/memory-models/ARM64.tla).
-* `ARM64_None.cfg` → **VIOLATED** (plain store).
-* `ARM64_Release.cfg` → **VIOLATED** (release / `stlr` is *not enough*).
-* `ARM64_Full.cfg` → **HOLDS** (`dmb ish` / seq-cst RMW).
+ARM64 is covered by the hardware repro (§5.1, §7) rather than by a TLA+ litmus.
+The formal models use the x86-TSO store buffer, which is the *stronger* of the
+two: an ordering violation reachable under TSO is reachable under ARM64 as well,
+so modeling on TSO is the conservative choice.
 
 ### 2.3 Why emulation cannot reproduce it
 
@@ -300,8 +300,8 @@ All three fixes are proven safe in `tla/` (`FixedLightEpochWithMemoryBarrier`,
 │   │   ├── WindowsNative.cs                           # VirtualAlloc/VirtualFree, thread pinning
 │   └── LightEpoch.Repro/            # the executable (--pattern bare|resume-and-refresh)
 ├── tla/
-│   ├── memory-models/               # the memory models themselves
-│   │   ├── X86TSO.tla · ARM64.tla
+│   ├── memory-models/               # the memory model itself
+│   │   ├── X86TSO.tla
 │   ├── epoch/                       # the epoch algorithm
 │   │   ├── LightEpoch.tla                              # buggy   -> VIOLATED
 │   │   ├── LightEpochResumeAndRefresh.tla              # Tsavorite per-op API, buggy -> VIOLATED
@@ -376,7 +376,7 @@ architectures need different ones.
 
 ```bash
 docker build -f tla/Dockerfile -t lightepoch-tla tla
-docker run --rm lightepoch-tla        # checks all 11 specs and prints expected vs. actual
+docker run --rm lightepoch-tla        # checks all 12 specs and prints expected vs. actual
 ```
 
 Expected outcomes. Note the **Models** column: every spec whose name starts with
@@ -388,9 +388,6 @@ both are VIOLATED.
 |---|---|---|---|
 | `X86TSO` | no fence | hardware litmus | VIOLATED |
 | `X86TSO` | MFENCE | hardware litmus | HOLDS |
-| `ARM64` | none | hardware litmus | VIOLATED |
-| `ARM64` | release | hardware litmus | VIOLATED |
-| `ARM64` | full | hardware litmus | HOLDS |
 | `LightEpoch` | — | **Tsavorite as shipped** | **VIOLATED** |
 | `FixedLightEpochWithMemoryBarrier` | — | proposed fix | HOLDS |
 | `FixedLightEpochWithInterlocked` | — | proposed fix | HOLDS |

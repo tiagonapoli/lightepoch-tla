@@ -5,8 +5,10 @@
 set -u
 
 JAR="${TLA_TOOLS:-/opt/tla2tools.jar}"
-TLC=(java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -deadlock -cleanup)
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# -DTLA-Library lets specs in epoch/ and epoch/fixes/ resolve the shared
+# MODULE StoreBuffer, which lives at the top of this folder.
+TLC=(java -XX:+UseParallelGC "-DTLA-Library=$HERE" -cp "$JAR" tlc2.TLC -workers auto -deadlock -cleanup)
 failures=0
 
 run() {
@@ -42,24 +44,29 @@ run() {
   rm -f "$output"
 }
 
-echo "================= Memory-model litmus specs ================="
+echo "================= Memory-model litmus spec ================="
 run "$HERE/memory-models" X86TSO X86TSO_NoFence.cfg  VIOLATED "StoreLoad window without a fence"
 run "$HERE/memory-models" X86TSO X86TSO_Fence.cfg    HOLDS    "MFENCE closes it"
-run "$HERE/memory-models" ARM64  ARM64_None.cfg      VIOLATED "plain store"
-run "$HERE/memory-models" ARM64  ARM64_Release.cfg   VIOLATED "release store is not enough"
-run "$HERE/memory-models" ARM64  ARM64_Full.cfg      HOLDS    "DMB ISH / seq-cst RMW"
 
 echo ""
 echo "================= LightEpoch reclamation specs ================="
-run "$HERE/epoch"       LightEpoch                            LightEpoch.cfg                            VIOLATED "missing announce fence"
-run "$HERE/epoch/fixes" FixedLightEpochWithMemoryBarrier      FixedLightEpochWithMemoryBarrier.cfg      HOLDS    "full StoreLoad barrier"
-run "$HERE/epoch/fixes" FixedLightEpochWithInterlocked        FixedLightEpochWithInterlocked.cfg        HOLDS    "atomic RMW announce"
-run "$HERE/epoch/fixes" FixedLightEpochWithAsymmetricBarrier  FixedLightEpochWithAsymmetricBarrier.cfg  HOLDS    "reclaimer-side barrier"
+echo "# Each epoch spec is checked under BOTH memory models (MODULE StoreBuffer):"
+echo "#   tso = x86-TSO, FIFO store-buffer drain, only StoreLoad relaxed"
+echo "#   arm = additionally relaxes StoreStore (any pending store may drain first)"
+echo "# Every tso behavior is also an arm behavior, so VIOLATED under tso implies"
+echo "# VIOLATED under arm, and HOLDS under arm implies HOLDS under tso."
+
+run "$HERE/epoch"       LightEpoch                        LightEpoch_tso.cfg                        VIOLATED "missing announce fence (x86-TSO)"
+run "$HERE/epoch"       LightEpoch                        LightEpoch_arm.cfg                        VIOLATED "missing announce fence (+StoreStore)"
+run "$HERE/epoch/fixes" FixedLightEpochWithMemoryBarrier  FixedLightEpochWithMemoryBarrier_tso.cfg  HOLDS    "full StoreLoad barrier (x86-TSO)"
+run "$HERE/epoch/fixes" FixedLightEpochWithMemoryBarrier  FixedLightEpochWithMemoryBarrier_arm.cfg  HOLDS    "full StoreLoad barrier (+StoreStore)"
 
 echo ""
 echo "========= Resume+Refresh per-operation API specs (Resume+Refresh+Suspend) ========="
-run "$HERE/epoch"       LightEpochResumeAndRefresh                   LightEpochResumeAndRefresh.cfg                   VIOLATED "both per-op announces unfenced"
-run "$HERE/epoch/fixes" FixedLightEpochResumeAndRefresh              FixedLightEpochResumeAndRefresh.cfg              HOLDS    "fence at both announce sites"
+run "$HERE/epoch"       LightEpochResumeAndRefresh       LightEpochResumeAndRefresh_tso.cfg       VIOLATED "both per-op announces unfenced (x86-TSO)"
+run "$HERE/epoch"       LightEpochResumeAndRefresh       LightEpochResumeAndRefresh_arm.cfg       VIOLATED "both per-op announces unfenced (+StoreStore)"
+run "$HERE/epoch/fixes" FixedLightEpochResumeAndRefresh  FixedLightEpochResumeAndRefresh_tso.cfg  HOLDS    "fence at both announce sites (x86-TSO)"
+run "$HERE/epoch/fixes" FixedLightEpochResumeAndRefresh  FixedLightEpochResumeAndRefresh_arm.cfg  HOLDS    "fence at both announce sites (+StoreStore)"
 
 echo ""
 if [[ $failures -ne 0 ]]; then

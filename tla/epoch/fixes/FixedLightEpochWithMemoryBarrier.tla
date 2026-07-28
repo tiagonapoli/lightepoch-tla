@@ -5,7 +5,7 @@
 (*                                                                         *)
 (* Models the epoch ENTER path against a per-core store buffer (the x86-TSO *)
 (* shape; the same StoreLoad window exists, and is far easier to observe,   *)
-(* on ARM64 — see memory-models/ARM64.tla).                                 *)
+(* on ARM64).                                                              *)
 (*                                                                         *)
 (* Two threads share one epoch:                                            *)
 (*   Reader (Rd):  announce localCurrentEpoch := CurrentEpoch  (PLAIN store *)
@@ -27,6 +27,8 @@
 (***************************************************************************)
 EXTENDS Naturals, Sequences
 
+CONSTANT Model          \* "tso" | "arm" — see MODULE StoreBuffer
+
 Rd == "Rd"
 Rc == "Rc"
 Procs == {Rd, Rc}
@@ -34,17 +36,9 @@ Procs == {Rd, Rc}
 VARIABLES mem, sb, holds, eRead, gRetire, pcRd, pcRc
 vars == <<mem, sb, holds, eRead, gRetire, pcRd, pcRc>>
 
-Max(S) == CHOOSE x \in S : \A y \in S : y <= x
-Min(a, b) == IF a < b THEN a ELSE b
-
-\* Load with store forwarding: newest buffered write to f, else memory.
-Load(p, f) ==
-    LET idxs == { i \in DOMAIN sb[p] : sb[p][i].f = f }
-    IN  IF idxs = {} THEN mem[f] ELSE sb[p][Max(idxs)].v
-
-RECURSIVE ApplyAll(_, _)
-ApplyAll(m, s) == IF s = <<>> THEN m
-                  ELSE ApplyAll([m EXCEPT ![Head(s).f] = Head(s).v], Tail(s))
+SB == INSTANCE StoreBuffer
+Load(p, f) == SB!Load(p, f)
+Min(a, b)  == SB!Min(a, b)
 
 Init ==
     /\ mem = [ ce |-> 1, lce |-> 0, ret |-> FALSE, freed |-> FALSE ]
@@ -55,11 +49,9 @@ Init ==
     /\ pcRd = "acq"
     /\ pcRc = "retire"
 
-\* Asynchronous store-buffer drain (FIFO): one buffered write becomes visible.
+\* Asynchronous store-buffer drain: one buffered write becomes visible.
 FlushOne(p) ==
-    /\ sb[p] # <<>>
-    /\ mem' = [mem EXCEPT ![Head(sb[p]).f] = Head(sb[p]).v]
-    /\ sb'  = [sb EXCEPT ![p] = Tail(sb[p])]
+    /\ SB!FlushOne(p)
     /\ UNCHANGED <<holds, eRead, gRetire, pcRd, pcRc>>
 
 \* Reader ---------------------------------------------------------------------
@@ -69,9 +61,8 @@ FlushOne(p) ==
 Acq ==
     /\ pcRd = "acq"
     /\ eRead' = Load(Rd, "ce")
-    /\ LET newbuf == Append(sb[Rd], [f |-> "lce", v |-> eRead'])
-       IN /\ mem' = ApplyAll(mem, newbuf)
-          /\ sb'  = [sb EXCEPT ![Rd] = <<>>]
+    /\ mem' = SB!FencedStore(Rd, "lce", eRead')
+    /\ sb'  = SB!Drained(Rd)
     /\ pcRd' = "cap"
     /\ UNCHANGED <<holds, gRetire, pcRc>>
 
@@ -90,24 +81,24 @@ Use ==
 
 Rel ==
     /\ pcRd = "rel"
-    /\ sb' = [sb EXCEPT ![Rd] = Append(sb[Rd], [f |-> "lce", v |-> 0])]
+    /\ sb' = SB!Buffer(Rd, "lce", 0)
     /\ pcRd' = "done"
     /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRc>>
 
 \* Reclaimer ------------------------------------------------------------------
 Retire ==
     /\ pcRc = "retire"
-    /\ sb' = [sb EXCEPT ![Rc] = Append(sb[Rc], [f |-> "ret", v |-> TRUE])]
+    /\ sb' = SB!Buffer(Rc, "ret", TRUE)
     /\ pcRc' = "bump"
     /\ UNCHANGED <<mem, holds, eRead, gRetire, pcRd>>
 
 \* Interlocked.Increment(CurrentEpoch): a full RMW -> drains Rc's store buffer.
 Bump ==
     /\ pcRc = "bump"
-    /\ LET m1 == ApplyAll(mem, sb[Rc])
+    /\ LET m1 == SB!Fenced(Rc)
        IN /\ mem' = [m1 EXCEPT !.ce = m1.ce + 1]
           /\ gRetire' = m1.ce
-    /\ sb' = [sb EXCEPT ![Rc] = <<>>]
+    /\ sb' = SB!Drained(Rc)
     /\ pcRc' = "compute"
     /\ UNCHANGED <<holds, eRead, pcRd>>
 
