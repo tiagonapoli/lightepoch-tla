@@ -571,9 +571,7 @@ Finished in 00s at (2026-07-28 03:41:31)
 ```
 
 `Error: Invariant NoUseAfterFree is violated.` is the result: on x86-TSO, with no
-fence on the announce, the object *can* be freed while the reader is inside. The
-`readerPc`/`reclaimerPc` fields are each thread's program counter, so the two threads
-can be read off independently down the trace.
+fence on the announce, the object *can* be freed while the reader is inside.
 
 ### The same trace, step by step
 
