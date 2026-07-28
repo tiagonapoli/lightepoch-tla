@@ -54,27 +54,33 @@ Threads are always pinned one per **physical** core; SMT siblings are never pair
 Detection is a genuine unmapped-page fault. "Time to fault" is wall-clock from
 process start; `SURVIVED` means the run was killed at the cap with no fault.
 
-| CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) |
-|---|---|---|---|---|
-| Cobalt 100 / N2 (4) | `bare` | 2 (1 pair) | no fault in 120 s | — |
-| Cobalt 100 / N2 (4) | `bare` | 4 (2 pairs) | **FAULT @ 8 s** | — |
-| Ampere Altra / N1 (4) | `bare` | 2 (1 pair) | no fault in 120 s | — |
-| Ampere Altra / N1 (4) | `bare` | 4 (2 pairs) | no fault in 120 s | — |
-| Cobalt 100 / N2 (16) | `bare` | 4 (2 pairs) | **FAULT @ 36 s** | — |
-| Cobalt 100 / N2 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — |
-| Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | **FAULT @ 7 s** | SURVIVED 300 s |
-| Cobalt 100 / N2 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 73 s** | — |
-| Ampere Altra / N1 (16) | `bare` | 4 (2 pairs) | no fault in 120 s *(capped)* | — |
-| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — |
-| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | no fault in 120 s *(capped)* | — |
-| Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s |
-| Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s |
+A single fault proves the window exists but says nothing about how readily it opens,
+so the configurations of interest were also **soaked**: the `baseline` build was
+relaunched back to back until 50 faults were collected, each attempt killed at a cap
+and counted as a miss if it survived. That is the last column.
 
-The 4-core and 16-core rows are the same two machines, resized between runs.
+| CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) | `baseline` soak (faults / attempts) |
+|---|---|---|---|---|---|
+| Cobalt 100 / N2 (4) | `bare` | 2 (1 pair) | no fault in 120 s | — | — |
+| Cobalt 100 / N2 (4) | `bare` | 4 (2 pairs) | **FAULT @ 8 s** | — | — |
+| Ampere Altra / N1 (4) | `bare` | 2 (1 pair) | no fault in 120 s | — | — |
+| Ampere Altra / N1 (4) | `bare` | 4 (2 pairs) | no fault in 120 s | — | — |
+| Cobalt 100 / N2 (16) | `bare` | 4 (2 pairs) | **FAULT @ 36 s** | — | — |
+| Cobalt 100 / N2 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — | — |
+| Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | **FAULT @ 7 s** | SURVIVED 300 s | **50 / 51** — 98 % |
+| Cobalt 100 / N2 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 73 s** | — | — |
+| Ampere Altra / N1 (16) | `bare` | 4 (2 pairs) | no fault in 120 s *(capped)* | — | — |
+| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — | — |
+| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | no fault in 120 s *(capped)* | — | — |
+| Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s | 6 / 21 — 29 % |
+| Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s | 14 / 45 — 31 % *(running)* |
+
+The 4-core and 16-core rows are the same two machines, resized between runs. Soak caps
+were 300 s except for the last row, which used 120 s.
 
 Concurrency is the dominant factor in how fast the window opens: every extra pair is
 another independent chance per unit time for the reclaimer's scan to run before the
-reader's unfenced announce becomes visible. Two results make the point sharply:
+reader's unfenced announce becomes visible. Three results stand out:
 
 * **`bare` is much harder to reproduce on Neoverse-N1 than on N2.** N2 faults under
   `bare` in as little as 7 s; N1 did not fault under `bare` in any 120 s run, at
@@ -83,6 +89,17 @@ reader's unfenced announce becomes visible. Two results make the point sharply:
   capped observations, not proof of absence.
 * **N1 at 4 physical cores produced no fault at all**, under either pattern; 16 cores
   are what make it reproducible.
+* **The two parts differ by more than an order of magnitude in how cheap the repro
+  is.** N2 reproduces essentially on demand — 50 faults in 51 attempts, about 43
+  minutes end to end, fastest fault in 1 s. N1 faults on roughly one attempt in
+  three, so the same 50 faults cost hours of wall clock.
+
+In every soak the faults are **bursty** rather than evenly spread — long runs of
+misses sit between clusters of quick faults. This is why a single "survived" run is
+weak evidence, and why the repeat count matters more than any one time-to-fault.
+
+`fullbarrier` was run for a full 300 s on each machine under the exact configuration
+that faults the baseline there, and survived every time.
 
 Faulting stack, every time — the reader dereferencing a page the epoch already freed:
 
@@ -93,29 +110,6 @@ System.AccessViolationException: Attempted to read or write protected memory.
                                        [LightEpoch.Repro.Common.BareReproPattern, ...]].ReaderLoop()
    at System.Threading.Thread.StartCallback()
 ```
-
-### ARM64 — repeatability
-
-A single fault proves the window exists; it does not show how readily it opens. To
-measure that, the `baseline` build was run back to back on both 16-core machines until
-50 faults were collected, each attempt capped and killed if it survived. A capped run
-counts as a miss.
-
-| CPU (phys cores) | Repro | Threads (pairs) | Cap | Faults / attempts | Hit rate | Time to fault (avg / min / max) |
-|---|---|---|---|---|---|---|
-| Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | 300 s | **50 / 51** | 98 % | 40 s / 1 s / 158 s |
-| Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | 300 s | 6 / 21 | 29 % | 61 s / 20 s / 143 s |
-| Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | 120 s | 8 / 24 *(running)* | 33 % | 47 s / 7 s / 94 s |
-
-Neoverse-N2 reproduces essentially on demand — 50 faults in 51 attempts, taking about
-43 minutes end to end, with the fastest fault landing in 1 second. Neoverse-N1 is far
-more resistant: roughly one attempt in three faults, so the same 50 faults cost hours
-of wall clock. In both cases the faults are **bursty** rather than evenly spread —
-long runs of misses sit between clusters of quick faults — which is why a single
-"survived" run is weak evidence and the repeat count matters.
-
-`fullbarrier` was run for a full 300 s on each machine under the exact configuration
-that faults the baseline there, and survived every time.
 
 ### x86-64 — logical use-after-free detection
 
