@@ -34,14 +34,13 @@ The bug is demonstrated in two complementary ways:
   * [x86-64 method — quarantine, logical verdict](#x86-64-method--quarantine-logical-verdict)
   * [Reproducing the numbers](#reproducing-the-numbers)
 * [The exact interleaving with TLA+](#the-exact-interleaving-with-tla)
-  * [The mental model you need first](#the-mental-model-you-need-first)
+  * [Note on StoreBuffer](#note-on-storebuffer)
   * [The raw TLC output](#the-raw-tlc-output)
   * [The same trace, step by step](#the-same-trace-step-by-step)
   * [Why it is genuinely hard to see](#why-it-is-genuinely-hard-to-see)
   * [What actually fixes it, and what does not](#what-actually-fixes-it-and-what-does-not)
   * [The same trace, in production shape](#the-same-trace-in-production-shape)
   * [Reading the model yourself](#reading-the-model-yourself)
-* [Full report](#full-report)
 
 ---
 
@@ -356,10 +355,10 @@ dotnet LightEpoch.Repro.dll --impl baseline --pairs 1 --rounds 5000000 --quarant
 
 ## The exact interleaving with TLA+
 
-The hardware repro proves the bug *happens*. It cannot show you *why*, because by the
-time the page faults the evidence is gone. The TLA+ model can: TLC explores every
-interleaving of the two threads and every possible moment the store buffer drains, and
-when it finds a violation it prints the shortest path to it.
+The hardware repro proves the bug *happens*. The TLA+ model can show the states
+leading to the issue: TLC explores every interleaving of the two threads and every
+possible moment the store buffer drains, and when it finds a violation it prints the
+shortest path to it.
 
 Reproduce it yourself:
 
@@ -368,7 +367,7 @@ cd tla
 .\run-tests-in-docker.ps1
 ```
 
-### The mental model you need first
+### Note on StoreBuffer
 
 One idea explains the entire bug:
 
@@ -701,13 +700,4 @@ Each spec is checked under two memory models: `tso` (x86, only StoreLoad relaxed
 behaviour is also an ARM behaviour, so a violation under `tso` is the conservative
 result, and the fixes holding under `arm` shows they do not secretly depend on
 FIFO drain order.
-
----
-
-## Full report
-
-The analysis behind these results — the algorithm and the bug, the x86-TSO and ARM64
-memory models, each candidate fix, how the repros detect a use-after-free, how
-Tsavorite actually drives the epoch, and the TLA+ models — is in
-**[Draft.md](Draft.md)**.
 
