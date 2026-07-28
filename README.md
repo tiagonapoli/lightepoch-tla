@@ -159,21 +159,22 @@ process start; `SURVIVED` means the run was killed at the cap with no fault.
 A single fault proves the window exists but says nothing about how readily it opens,
 so the configurations of interest were also **soaked**: the `baseline` build was
 relaunched back to back until 50 faults were collected, each attempt killed at a cap
-and counted as a miss if it survived. That is the last column.
+and counted as a miss if it survived. Those results are below the table.
 
-| CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) | `baseline` soak (faults / attempts) |
-|---|---|---|---|---|---|
-| Cobalt 100 / N2 (16) | `bare` | 4 (2 pairs) | **FAULT @ 36 s** | — | — |
-| Cobalt 100 / N2 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — | — |
-| Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | **FAULT @ 7 s** | SURVIVED 300 s | **50 / 51** — 98 % |
-| Cobalt 100 / N2 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 73 s** | — | — |
-| Ampere Altra / N1 (16) | `bare` | 4 (2 pairs) | no fault in 120 s *(capped)* | — | — |
-| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — | — |
-| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | no fault in 120 s *(capped)* | — | — |
-| Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s | 6 / 21 — 29 % |
-| Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s | 14 / 45 — 31 % *(running)* |
+| CPU (phys cores) | Repro | Threads (pairs) | `baseline` (buggy) | `fullbarrier` (fixed) |
+|---|---|---|---|---|
+| Cobalt 100 / N2 (16) | `bare` | 4 (2 pairs) | **FAULT @ 36 s** | — |
+| Cobalt 100 / N2 (16) | `bare` | 16 (8 pairs) | **FAULT @ 7 s** | SURVIVED 300 s |
+| Cobalt 100 / N2 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 73 s** | — |
+| Ampere Altra / N1 (16) | `bare` | 4 (2 pairs) | no fault in 120 s *(capped)* | — |
+| Ampere Altra / N1 (16) | `bare` | 8 (4 pairs) | no fault in 120 s *(capped)* | — |
+| Ampere Altra / N1 (16) | `bare` | 16 (8 pairs) | no fault in 120 s *(capped)* | — |
+| Ampere Altra / N1 (16) | `resume-and-refresh` | 8 (4 pairs) | **FAULT @ 72 s** | SURVIVED 300 s |
+| Ampere Altra / N1 (16) | `resume-and-refresh` | 16 (8 pairs) | **FAULT @ 41 s** | SURVIVED 300 s |
 
-Soak caps were 300 s except for the last row, which used 120 s.
+Soak results, as faults per attempt: N2 `bare` at 16 threads **50 / 51 — 98 %**; N1
+`resume-and-refresh` at 8 threads 6 / 21 — 29 %, and at 16 threads 14 / 45 — 31 %
+*(still running)*. Caps were 300 s except the last, which used 120 s.
 
 Concurrency is the dominant factor in how fast the window opens: every extra pair is
 another independent chance per unit time for the reclaimer's scan to run before the
