@@ -19,6 +19,30 @@ The bug is demonstrated in two complementary ways:
    of the epoch algorithm with each candidate fix. TLC exhaustively finds the
    use-after-free in the baseline and proves each fix closes it.
 
+## Contents
+
+* [Overview: where the barrier is missing](#overview-where-the-barrier-is-missing)
+  * [The reader side — announces with a plain store](#the-reader-side--announces-with-a-plain-store)
+  * [The reclaimer side — scans without synchronizing with the reader](#the-reclaimer-side--scans-without-synchronizing-with-the-reader)
+* [Results: reproduced on ARM64 and x86-64](#results-reproduced-on-arm64-and-x86-64)
+  * [Hardware used for tests](#hardware-used-for-tests)
+  * [ARM64 — hardware access violation (`0xC0000005`)](#arm64--hardware-access-violation-0xc0000005)
+  * [x86-64 — logical use-after-free detection](#x86-64--logical-use-after-free-detection)
+* [Methodology](#methodology)
+  * [The shared race (both architectures)](#the-shared-race-both-architectures)
+  * [ARM64 method — detection by real memory unmapping](#arm64-method--detection-by-real-memory-unmapping)
+  * [x86-64 method — quarantine, logical verdict](#x86-64-method--quarantine-logical-verdict)
+  * [Reproducing the numbers](#reproducing-the-numbers)
+* [The exact interleaving with TLA+](#the-exact-interleaving-with-tla)
+  * [The mental model you need first](#the-mental-model-you-need-first)
+  * [The raw TLC output](#the-raw-tlc-output)
+  * [The same trace, step by step](#the-same-trace-step-by-step)
+  * [Why it is genuinely hard to see](#why-it-is-genuinely-hard-to-see)
+  * [What actually fixes it, and what does not](#what-actually-fixes-it-and-what-does-not)
+  * [The same trace, in production shape](#the-same-trace-in-production-shape)
+  * [Reading the model yourself](#reading-the-model-yourself)
+* [Full report](#full-report)
+
 ---
 
 ## Overview: where the barrier is missing
@@ -221,7 +245,7 @@ different sockets (socket 0 = LP 0-31, socket 1 = LP 32-63):
 `--impl fullbarrier` and `--pattern resume-and-refresh` are run with the identical
 core assignments.
 
-The control is what makes this meaningful: `fullbarrier` recorded **0 violations**.
+`fullbarrier` recorded **0 violations**.
 
 ---
 
@@ -259,11 +283,10 @@ race    curPage = 0  (unlink the page)           Resume()
 ```
 
 The reclaimer side is already correctly fenced (`Interlocked.Increment` is a full
-barrier), so the **only** unordered access in the whole loop is the reader's announce
-store. A violation therefore requires exactly one thing: the reclaimer's scan ran
-before the reader's announce became visible, so the scan concluded no reader was
-protected and the page was freed while the reader was still inside its critical
-section.
+barrier), so the **only** unordered access is the reader's announce store. A
+violation therefore requires exactly one thing: the reclaimer's scan ran before the
+reader's announce became visible, so the scan concluded no reader was protected and
+the page was freed while the reader was still inside its critical section.
 
 The repro harness has these flags for distributing the reader-reclaimer pairs across
 the machine:
@@ -301,8 +324,7 @@ So the x86 mode keeps the kernel out of the loop entirely:
 * **Verdict:** the reader checks the values it reads while protected. Observing
   poison means the epoch freed a page the reader was legitimately reading — a
   use-after-free by the algorithm's own definition.
-* Implemented in `QuarantineLitmus<TOps, TPattern>` (`--quarantine`), a **separate**
-  class; the ARM64 unmap path is untouched.
+* Implemented in `QuarantineLitmus<TOps, TPattern>` (`--quarantine`).
 
 ### Reproducing the numbers
 
@@ -322,24 +344,13 @@ dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 2 --rounds 100000000000
 # The Tsavorite per-operation sequence (defaults to --pattern bare)
 dotnet LightEpoch.Repro.dll --pattern resume-and-refresh --impl baseline --pairs 2 --rounds 100000000000
 
-# x86-64 - logical detection. "USE-AFTER-FREE" on stderr = bug reproduced.
-dotnet LightEpoch.Repro.dll --impl baseline    --pairs 5 --rounds 8000000 --quarantine
-dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 5 --rounds 8000000 --quarantine
-
-# Detector self-test - MUST report violations, otherwise --quarantine results are meaningless
-dotnet LightEpoch.Repro.dll --impl fullbarrier --pairs 1 --rounds 200000 --self-test
-
 # x86-64 with read-only disturbers - the high-yield configuration used for the table
-# above. --disturber-cores must list DISTINCT physical cores; SMT siblings share L1
-# and produce no coherence traffic, which silently drops the yield to zero.
+# above. "USE-AFTER-FREE" on stderr = bug reproduced. --disturber-cores must list
+# DISTINCT physical cores; SMT siblings share L1 and produce no coherence traffic,
+# which silently drops the yield to zero.
 dotnet LightEpoch.Repro.dll --impl baseline --pairs 1 --rounds 5000000 --quarantine `
     --reclaimer-core 0 --reader-core 16 --disturber-cores 2,4,6,8,10,18,20,22,24,26
 ```
-
-x86 violations are rare without disturbers, so run the buggy build several times and
-always compare against a fixed build over the same number of runs. With disturbers
-the rate is high enough that a single run is informative, but the `fullbarrier`
-control should still be run for the same duration.
 
 ---
 
