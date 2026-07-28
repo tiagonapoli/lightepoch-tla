@@ -78,10 +78,26 @@ namespace LightEpoch.Repro.Common
 
             return pattern switch
             {
-                "bare" => Run<BareReproPattern>(forwarded.ToArray()),
-                "resume-and-refresh" => Run<ResumeAndRefreshReproPattern>(forwarded.ToArray()),
+                "bare" => Guarded(() => Run<BareReproPattern>(forwarded.ToArray())),
+                "resume-and-refresh" => Guarded(() => Run<ResumeAndRefreshReproPattern>(forwarded.ToArray())),
                 _ => UnknownPattern(pattern),
             };
+        }
+
+        // An unhandled exception exits with 0xE0434352, and in unmap mode any nonzero
+        // exit is the signal for "fault observed". A misused switch must not be
+        // mistaken for a reproduction, so argument errors surface as exit code 2.
+        private static int Guarded(Func<int> run)
+        {
+            try
+            {
+                return run();
+            }
+            catch (ArgumentException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return 2;
+            }
         }
 
         private static int Run<TPattern>(string[] args)
@@ -176,6 +192,13 @@ namespace LightEpoch.Repro.Common
                 Console.Error.WriteLine("rounds and deref must both be positive");
                 return 2;
             }
+
+            // Disturbers only widen the window on x86-64, where the store buffer commits
+            // in order: holding the announce's line shared keeps that store, and every
+            // store behind it, pending. ARM64 store buffers have no such ordering, so
+            // the disturbers add coherence traffic without pinning the announce.
+            if (disturberCores.Length > 0 && !quarantine)
+                throw new ArgumentException("--disturber-cores requires --quarantine; it does nothing in unmap mode. See the ARM64 measurements in the README.");
 
             var physicalCores = CoreTopology.Enumerate();
 
@@ -309,8 +332,8 @@ namespace LightEpoch.Repro.Common
 
             return impl switch
             {
-                "baseline" => new Litmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter, disturberCores).Run(),
-                "fullbarrier" => new Litmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter, disturberCores).Run(),
+                "baseline" => new Litmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter).Run(),
+                "fullbarrier" => new Litmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter).Run(),
                 _ => UnknownImplementation(impl),
             };
         }
@@ -419,7 +442,9 @@ namespace LightEpoch.Repro.Common
                 "  line with localCurrentEpoch, so without disturbers that CAS leaves the line\n" +
                 "  owned and the announce retires immediately, closing the window. Under\n" +
                 "  disturbance the announce must win an RFO, and x86 store buffers commit in\n" +
-                "  order, so it stays pending and the race becomes observable.\n" +
+                "  order, so it stays pending and the race becomes observable. That ordering\n" +
+                "  argument is x86-only, so this requires --quarantine and is rejected in unmap\n" +
+                "  mode.\n" +
                 "The retiring thread always holds an epoch and refreshes it each round, the way\n" +
                 "  Tsavorite drives the epoch in production; BumpCurrentEpoch asserts that.\n" +
                 "exit 0 = survived; nonzero/aborted = fault observed.");

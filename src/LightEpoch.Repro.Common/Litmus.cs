@@ -21,6 +21,11 @@ namespace LightEpoch.Repro.Common
     /// Both the epoch implementation and the operation pattern are structs, so the JIT
     /// specializes and devirtualizes their calls instead of adding synchronization to
     /// the race window being measured.
+    ///
+    /// There are no disturber threads here. They widen the window only on x86-64, whose
+    /// store buffer commits in order, so holding the announce's cache line shared keeps
+    /// that store pending; ARM64 gives no such ordering, and measured on Neoverse-N1 and
+    /// N2 the disturbers did not help.
     /// </summary>
     internal sealed unsafe class Litmus<TOps, TPattern>
         where TOps : struct, IEpochOps
@@ -44,10 +49,9 @@ namespace LightEpoch.Repro.Common
         private readonly int reclaimerCore;
         private readonly int reclaimerDelay;
         private readonly bool jitter;
-        private readonly int[] disturberCores;
         private ulong rngState = 0x9E3779B97F4A7C15;
 
-        public Litmus(long rounds, int deref, int readerCore, int reclaimerCore, int reclaimerDelay = 0, bool jitter = false, int[] disturberCores = null)
+        public Litmus(long rounds, int deref, int readerCore, int reclaimerCore, int reclaimerDelay = 0, bool jitter = false)
         {
             this.rounds = rounds;
             this.deref = deref;
@@ -55,7 +59,6 @@ namespace LightEpoch.Repro.Common
             this.reclaimerCore = reclaimerCore;
             this.reclaimerDelay = reclaimerDelay;
             this.jitter = jitter;
-            this.disturberCores = disturberCores ?? Array.Empty<int>();
             ops = new TOps();
             pattern = new TPattern();
         }
@@ -72,24 +75,6 @@ namespace LightEpoch.Repro.Common
             };
             reader.Start();
 
-            // Disturber threads only read the epoch table, so they cannot influence any
-            // epoch decision. Their job is to keep the table's cache lines shared rather
-            // than exclusively owned by the announcing thread: Acquire() runs a CAS on
-            // threadId, which shares a cache line with localCurrentEpoch, so without
-            // disturbance that CAS leaves the line owned and the announce becomes
-            // visible almost immediately, closing the window. Under disturbance the
-            // announce must first win the line back, so it stays pending long enough for
-            // the missing StoreLoad fence to be observable.
-            // Pin these to distinct physical cores: SMT siblings share L1 and generate
-            // no coherence traffic, which silently defeats the whole technique.
-            var disturbers = new Thread[disturberCores.Length];
-            for (int i = 0; i < disturberCores.Length; i++)
-            {
-                int core = disturberCores[i];
-                disturbers[i] = new Thread(() => DisturberLoop(core)) { IsBackground = true, Name = $"disturber{core}" };
-                disturbers[i].Start();
-            }
-
             WindowsNative.Pin(reclaimerCore);
 
             var stopwatch = Stopwatch.StartNew();
@@ -100,20 +85,6 @@ namespace LightEpoch.Repro.Common
             reader.Join(2000);
             Console.WriteLine($"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s with NO fault. sink={Volatile.Read(ref sink)}");
             return 0;
-        }
-
-        private void DisturberLoop(int core)
-        {
-            WindowsNative.Pin(core);
-
-            long local = 0;
-            while (!stop)
-            {
-                for (int i = 0; i < 64; i++)
-                    local += ops.ReadAllEntries();
-            }
-
-            Interlocked.Add(ref sink, local);
         }
 
         // Per-round spin length. Jitter sweeps the whole alignment space instead of
