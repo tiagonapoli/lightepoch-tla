@@ -480,12 +480,23 @@ work its verdict claims. Measured on the fixed build, reclamation is unaffected:
 `freedPages` equals the round count exactly.
 
 The sharpest example: tuning `--reclaimer-delay` to maximise how often the
-reader is mid-dereference when a page is reclaimed looks like a 250x sensitivity
-win, and is worthless. At `--reclaimer-delay 200` the reader is inside the page
-on 99.9% of rounds (`sampledRounds=19,990,219`) and a *known-buggy* baseline
-produces **zero** violations — the delay that maximises detector opportunity
-also closes the epoch race window. Harness knobs must be tuned to maximise the
-failure rate of the **control**, never the reach of the detector.
+reader is mid-dereference when a page is reclaimed looks like a large sensitivity
+win, and is worthless. Holding the command and core pinning fixed and varying
+only the delay, on the **known-buggy** baseline:
+
+| `--reclaimer-delay` | Detector opportunity (`sampledRounds` / 30,000,000) | Violations found |
+|---|---|---:|
+| 0 | 2.8 M (~9%) | **13** |
+| 200 | **30.0 M (~100%)** | **0** |
+
+Ten times the detector reach, and it finds nothing — because the delay that
+maximises detector opportunity also *closes the race window it is trying to
+observe*. Spinning the reclaimer before it unlinks gives the reader's announce
+all the time it needs to become visible, so the bug can no longer happen.
+Harness knobs must be tuned to maximise the failure rate of the **control**,
+never the reach of the detector; `sampledRounds` and self-test conversion are not
+proxies for statistical power. Every hardware number in this document was taken
+at delay 0 for that reason.
 
 ---
 
