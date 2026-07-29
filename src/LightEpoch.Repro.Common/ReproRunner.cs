@@ -116,6 +116,8 @@ namespace LightEpoch.Repro.Common
             int reclaimerDelay = 0;
             bool jitter = false;
             int[] disturberCores = Array.Empty<int>();
+            int readers = 0;
+            ushort slotSpace = 0;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -172,6 +174,15 @@ namespace LightEpoch.Repro.Common
                         if (disturberCores == null)
                             return InvalidValue(arg);
                         break;
+                    case "--readers":
+                        if (!TryReadInt(args, ref i, out readers))
+                            return InvalidValue(arg);
+                        break;
+                    case "--slot-space":
+                        if (!TryReadInt(args, ref i, out int slotSpaceValue) || slotSpaceValue < 1 || slotSpaceValue > ushort.MaxValue)
+                            return InvalidValue(arg);
+                        slotSpace = (ushort)slotSpaceValue;
+                        break;
                     case "--self-test":
                         quarantine = true;
                         selfTest = true;
@@ -202,6 +213,9 @@ namespace LightEpoch.Repro.Common
 
             var physicalCores = CoreTopology.Enumerate();
 
+            if (readers > 0)
+                return RunSharedEpoch<TPattern>(impl, rounds, deref, readers, slotSpace, reclaimerDelay, physicalCores, quarantine);
+
             // Two concurrent pairs reproduce the race far more reliably than one:
             // a single pair can run for minutes on Neoverse-N1 without faulting.
             if (pairs < 0)
@@ -217,6 +231,7 @@ namespace LightEpoch.Repro.Common
             Console.WriteLine($"{pattern.Name} repro  impl={impl}  rounds={rounds:N0}  deref={deref}  pairs={pairs}  reclaimerDelay={reclaimerDelay}{(jitter ? " (jittered)" : string.Empty)}");
             Console.WriteLine($"epoch sequence: {pattern.EpochSequence}");
             Console.WriteLine($"OS={RuntimeInformation.OSDescription.Trim()}  Arch={RuntimeInformation.ProcessArchitecture}  {CoreTopology.Describe()}");
+            Console.WriteLine($"ordering knobs: LE_ACQUIRE_ORDER={FixedLightEpochWithCasAnnounce.AcquireOrderName}  LE_REFRESH_ORDER={FixedLightEpochWithCasAnnounce.RefreshOrderName}");
             Console.WriteLine(quarantine
                 ? "detection: quarantine (page pool + poison sentinel; no syscall in the race loop)"
                 : "detection: unmap (VirtualFree MEM_RELEASE; a fault is a hardware access violation)");
@@ -317,6 +332,49 @@ namespace LightEpoch.Repro.Common
             return 0;
         }
 
+        private static int RunSharedEpoch<TPattern>(string impl, long rounds, int deref, int readers, ushort slotSpace, int reclaimerDelay, IReadOnlyList<CoreTopology.PhysicalCore> physicalCores, bool quarantine)
+            where TPattern : struct, IReproPattern
+        {
+            if (quarantine)
+            {
+                Console.Error.WriteLine("--readers is unmap-mode only; --quarantine is not supported with it");
+                return 2;
+            }
+
+            if (readers < 2)
+            {
+                Console.Error.WriteLine("--readers must be >= 2; the point of this mode is cross-thread slot reuse");
+                return 2;
+            }
+
+            if (physicalCores.Count < readers + 1)
+            {
+                Console.Error.WriteLine($"--readers {readers} needs {readers + 1} physical cores; only {physicalCores.Count} available");
+                return 2;
+            }
+
+            var pattern = new TPattern();
+            int reclaimerCore = physicalCores[0].RepresentativeLogicalProcessor;
+            var readerCores = new int[readers];
+            for (int i = 0; i < readers; i++)
+                readerCores[i] = physicalCores[i + 1].RepresentativeLogicalProcessor;
+
+            Console.WriteLine($"{pattern.Name} shared-epoch repro  impl={impl}  rounds={rounds:N0}  deref={deref}  readers={readers}  slotSpace={(slotSpace == 0 ? "production" : slotSpace.ToString())}  reclaimerDelay={reclaimerDelay}");
+            Console.WriteLine($"epoch sequence: {pattern.EpochSequence}");
+            Console.WriteLine($"OS={RuntimeInformation.OSDescription.Trim()}  Arch={RuntimeInformation.ProcessArchitecture}  {CoreTopology.Describe()}");
+            Console.WriteLine($"ordering knobs: LE_ACQUIRE_ORDER={FixedLightEpochWithCasAnnounce.AcquireOrderName}  LE_REFRESH_ORDER={FixedLightEpochWithCasAnnounce.RefreshOrderName}");
+            Console.WriteLine("detection: unmap (VirtualFree MEM_RELEASE; a fault is a hardware access violation)");
+            Console.WriteLine($"topology: ONE shared epoch instance; reclaimer=core {reclaimerCore}, readers=cores {string.Join(",", readerCores)}");
+
+            return impl switch
+            {
+                "baseline" => new MultiReaderLitmus<BaselineOps, TPattern>(rounds, deref, readerCores, reclaimerCore, reclaimerDelay, slotSpace).Run(),
+                "fullbarrier" => new MultiReaderLitmus<FullBarrierOps, TPattern>(rounds, deref, readerCores, reclaimerCore, reclaimerDelay, slotSpace).Run(),
+                "casannounce" => new MultiReaderLitmus<CasAnnounceOps, TPattern>(rounds, deref, readerCores, reclaimerCore, reclaimerDelay, slotSpace).Run(),
+                _ => UnknownImplementation(impl),
+            };
+        }
+
         private static int RunSingle<TPattern>(string impl, long rounds, int deref, int readerCore, int reclaimerCore, bool quarantine, bool selfTest, int reclaimerDelay, bool jitter, int[] disturberCores)
             where TPattern : struct, IReproPattern
         {
@@ -326,6 +384,7 @@ namespace LightEpoch.Repro.Common
                 {
                     "baseline" => new QuarantineLitmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, reclaimerDelay, jitter, disturberCores).Run(),
                     "fullbarrier" => new QuarantineLitmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, reclaimerDelay, jitter, disturberCores).Run(),
+                    "casannounce" => new QuarantineLitmus<CasAnnounceOps, TPattern>(rounds, deref, readerCore, reclaimerCore, selfTest, reclaimerDelay, jitter, disturberCores).Run(),
                     _ => UnknownImplementation(impl),
                 };
             }
@@ -334,6 +393,7 @@ namespace LightEpoch.Repro.Common
             {
                 "baseline" => new Litmus<BaselineOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter).Run(),
                 "fullbarrier" => new Litmus<FullBarrierOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter).Run(),
+                "casannounce" => new Litmus<CasAnnounceOps, TPattern>(rounds, deref, readerCore, reclaimerCore, reclaimerDelay, jitter).Run(),
                 _ => UnknownImplementation(impl),
             };
         }
@@ -392,7 +452,7 @@ namespace LightEpoch.Repro.Common
 
         private static int UnknownImplementation(string impl)
         {
-            Console.Error.WriteLine($"unknown --impl '{impl}' (want: baseline|fullbarrier)");
+            Console.Error.WriteLine($"unknown --impl '{impl}' (want: baseline|fullbarrier|casannounce)");
             return 2;
         }
 
@@ -407,10 +467,10 @@ namespace LightEpoch.Repro.Common
             var pattern = new TPattern();
             Console.WriteLine(
                 "usage: LightEpoch.Repro [--pattern <bare|resume-and-refresh>]\n" +
-                "       --impl <baseline|fullbarrier>\n" +
+                "       --impl <baseline|fullbarrier|casannounce>\n" +
                 "       [--rounds N] [--deref N] [--pairs N] [--seed N] [--cross-numa]\n" +
                 "       [--quarantine] [--self-test] [--reclaimer-delay N] [--jitter]\n" +
-                "       [--disturber-cores a,b,...]\n" +
+                "       [--disturber-cores a,b,...] [--readers N] [--slot-space K]\n" +
                 "       [--reader-core N --reclaimer-core N]   (single pair, manual pinning)\n" +
                 "--pattern selects the epoch sequence the reader runs per operation:\n" +
                 "  bare              Resume() -> access -> Suspend()   (isolates the Acquire announce)\n" +
@@ -420,6 +480,13 @@ namespace LightEpoch.Repro.Common
                 "Each pair runs a reader and a reclaimer, one per physical core (SMT siblings are\n" +
                 "never paired: they share a store buffer and the race window cannot open).\n" +
                 "--pairs defaults to 2 when at least 4 physical cores are available.\n" +
+                "--readers N switches to shared-epoch mode: N readers plus one reclaimer all use a\n" +
+                "  single LightEpoch instance, so readers claim and release slots concurrently.\n" +
+                "  --pairs mode gives every pair its own instance, so a slot is never handed from\n" +
+                "  one thread to another; this mode is the only one that covers that transition.\n" +
+                "--slot-space K confines the entry hash to the first K slots so readers actually\n" +
+                "  collide and reuse slots. The run reports how many slots were held by more than\n" +
+                "  one thread; if that count is 0 the mode tested nothing and the verdict is void.\n" +
                 "--quarantine selects the x86 detection mode: a pooled page + poison sentinel\n" +
                 "  instead of VirtualFree, so no TLB-shootdown IPI serializes the reader. The\n" +
                 "  default unmap mode is the right one on ARM64, where the fault is a genuine\n" +

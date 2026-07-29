@@ -28,6 +28,7 @@ The bug is demonstrated in two complementary ways:
   * [Hardware used for tests](#hardware-used-for-tests)
   * [ARM64 — hardware access violation (`0xC0000005`)](#arm64--hardware-access-violation-0xc0000005)
   * [x86-64 — logical use-after-free detection](#x86-64--logical-use-after-free-detection)
+* [Choosing the fix: the hazard is load-side](#choosing-the-fix-the-hazard-is-load-side)
 * [Methodology](#methodology)
   * [The shared race (both architectures)](#the-shared-race-both-architectures)
   * [ARM64 method — detection by real memory unmapping](#arm64-method--detection-by-real-memory-unmapping)
@@ -38,6 +39,7 @@ The bug is demonstrated in two complementary ways:
   * [The raw TLC output](#the-raw-tlc-output)
   * [The same trace, step by step](#the-same-trace-step-by-step)
   * [Reading the model yourself](#reading-the-model-yourself)
+* ["But Tsavorite already adds the barrier anyway"](#but-tsavorite-already-adds-the-barrier-anyway)
 
 ---
 
@@ -244,7 +246,161 @@ core assignments.
 
 ---
 
+## Choosing the fix: the hazard is load-side
+
+The obvious fix is a full `StoreLoad` barrier after the announce, and it works.
+But it costs **+49%** on the hot path, and it fails a basic sanity check: *the
+buggy code is safe on x86*. If the hazard were really a store-buffer /
+`StoreLoad` problem, x86 would fault too — x86 permits `StoreLoad` reordering.
+It does not fault. So the store-side diagnosis cannot be the whole story.
+
+Reading the two sides together shows why:
+
+```
+Reclaimer:  STORE objectUnlinked = TRUE
+            Interlocked.Increment(CurrentEpoch)   // locked RMW - already ordered
+Reader:     LOAD  CurrentEpoch  -> E+1
+            STORE slot = E+1                      // announce
+            LOAD  objectUnlinked -> STALE FALSE   // <-- the bug
+```
+
+The reclaimer's side needs no help: `Interlocked.Increment` is a locked RMW, so
+its unlink is already ordered before the epoch bump. This is textbook **message
+passing**, and the broken side is the *reader's* **load→load** ordering.
+Announcing `E+1` while your own view is still at `E` means vouching for an epoch
+you have not caught up to — which raises `SafeToReclaimEpoch` and authorises the
+reclaimer to free the very object you are about to read.
+
+That diagnosis explains the architecture split exactly: **x86 gives every load
+acquire semantics**, so the plain announce is already safe there; AArch64 does
+not. The fix is therefore an **acquire load**, not a barrier:
+
+```csharp
+(*(tableAligned + entry)).localCurrentEpoch = Volatile.Read(ref CurrentEpoch);
+```
+
+### What each candidate costs and whether it works
+
+| Refresh announce | TLA+ (`armlb`) | herd7 (official `aarch64.cat`) | ARM64 hardware | x86 cost |
+|---|---|---|---|---|
+| plain store | **VIOLATED** (255 states) | **ALLOWED** | **faulted 6/10** | — |
+| release store | **VIOLATED** (175 states) | **ALLOWED** | faulted | — |
+| plain + `DMB ISH` | HOLDS (155 states) | FORBIDDEN (0/5) | see note | **+49%** |
+| **acquire load** | **HOLDS** (235 states) | **FORBIDDEN** | **survived 10/10** | **+0.4%** |
+
+A release store fails because it orders the *wrong side*: it publishes the slot
+but does nothing to order the reader's later loads.
+
+The acquire load is not sufficient on its own — the **acquire-side** announce is
+a different shape. It is store-buffering (`SB`), not message passing, and
+release/acquire provably does not close `SB`; it needs the slot-claiming CAS.
+The two announce sites fail differently and need different strengths, which is
+why the fix has two parts.
+
+Neither is the acquire side sufficient on its own. Strengthening *only* the
+slot-claiming CAS, while leaving the refresh announce plain, still faults:
+
+| `LE_ACQUIRE_ORDER` | `LE_REFRESH_ORDER` | `resume-and-refresh`, 180 s |
+|---|---|---|
+| `cas` | `plain` | **crashed 2/3** — control |
+| `fence` | `plain` | **crashed 2/3** |
+| `cas` | acquire load | survived 3/3 |
+| `fence` | acquire load | survived 3/3 |
+
+Adding a full `DMB ISH` after the claim CAS changes nothing while the refresh
+announce stays plain, and adds nothing once it is fixed. On this path the
+refresh acquire-load is the load-bearing change.
+
+### What the hardware actually executes
+
+Verified by dumping emitted JIT bytes and disassembling them (the
+`DOTNET_JitDisasm` knobs produced no output), rather than by inference:
+
+| Source | Emitted on arm64 | Notes |
+|---|---|---|
+| `Interlocked.CompareExchange` (LSE) | `casal x1, x21, [x0]` | herd7: FORBIDDEN |
+| `Interlocked.CompareExchange` (no LSE) | `ldaxr` / `stlxr` + `dmb ish` | the trailing `dmb` is what makes it safe |
+| `Volatile.Read(ref CurrentEpoch)` | `ldapr x2, [x2]` | no `dmb` — a genuine one-instruction fix |
+
+The bare `ldaxr`/`stlxr` loop *without* the trailing barrier is **ALLOWED**
+(unsafe): an acquire load composed with a release store yields no `StoreLoad`
+edge. RyuJIT's `genCodeForCmpXchg` emits that barrier unconditionally at the
+join label, so both codegen paths are sound.
+
+Both complete sequences were then checked **as composed programs**, using the
+exact mnemonics above rather than idealised stand-ins:
+
+| Composed fix | herd7 verdict | witnesses |
+|---|---|---|
+| `casal` announce + `ldapr` refresh (LSE) | **FORBIDDEN** | 0/14 |
+| `ldaxr`/`stlxr` + `dmb ish` announce + `ldapr` refresh (no LSE) | **FORBIDDEN** | 0/13, 0/21 |
+
+Note `Volatile.Read` emits **`LDAPR`** (acquire-RCpc), not the stronger
+**`LDAR`** (RCsc). That distinction was checked rather than assumed: run in the
+same batch, the two are indistinguishable here (both `Never 0 6`), because this
+hazard needs only load→load ordering, which RCpc supplies. The RCsc/RCpc
+difference concerns ordering against an *earlier store-release*, which this
+shape does not involve.
+
+Both rows carry live controls: replacing `LDAPR` with a plain `LDR` is
+**ALLOWED**, and making the writer's RMW relaxed flips `LDAPR` back to
+**ALLOWED** (`Sometimes 1 7`) — so the `FORBIDDEN` depends on the writer
+genuinely publishing `objectUnlinked` before `currentEpoch`, and is not an
+artifact of an over-constrained encoding.
+
+### Open questions
+
+These are recorded because they are not yet closed, not because they are
+expected to fail:
+
+* The non-LSE codegen path has been exercised on hardware, but that batch had no
+  live sensitivity control, so under the rule below it currently proves nothing.
+  (The non-LSE path *is* covered formally, by the composed litmus above.)
+
+`WeakMemory.tla` cannot decide the RCsc/RCpc question either way — its acquire
+abstraction does not distinguish the two, and says so in a comment at
+`AcquireLoadFields`. That question is settled only by the herd7 rows above.
+
+### A note on method
+
+Two results in this study were retracted after being checked properly, both for
+the same reason: **a test mode proves nothing unless a known-buggy build still
+fails in it.**
+
+A third instance of the same failure mode was caught in the harness itself. The
+`LE_REFRESH_ORDER` knob accepted mode *names* and silently fell back to the
+default for anything else — and the default is the **fixed** mode. So a control
+invoked as `LE_REFRESH_ORDER=0` (the value the source comments use to describe
+the plain store) would quietly run the fix, survive, and be recorded as
+"the broken mode is safe". Unrecognised values now throw, and the banner prints
+the *resolved* mode name rather than echoing the raw environment string, so the
+run's own output states which arm it exercised. Any knob whose failure mode is
+"silently becomes the safe configuration" will eventually manufacture a false
+negative.
+
+The unmap-mode harness had a related hole: it printed **nothing** about how much
+it had actually reclaimed. A "survived" verdict is vacuous if the fix quietly
+stopped reclaiming — a build that never frees a page cannot fault no matter how
+broken its epoch logic is. Worse, the end-of-run summary only prints on normal
+completion, and the ARM runs are killed at a time cap, so the numbers that would
+have shown this never appeared at all. Both unmap harnesses now emit a progress
+line every 10 s carrying the reclaimed-page count (and, in shared-epoch mode, the
+slot-reuse report), so a killed run still leaves evidence that it was doing the
+work its verdict claims. Measured on the fixed build, reclamation is unaffected:
+`freedPages` equals the round count exactly.
+
+The sharpest example: tuning `--reclaimer-delay` to maximise how often the
+reader is mid-dereference when a page is reclaimed looks like a 250x sensitivity
+win, and is worthless. At `--reclaimer-delay 200` the reader is inside the page
+on 99.9% of rounds (`sampledRounds=19,990,219`) and a *known-buggy* baseline
+produces **zero** violations — the delay that maximises detector opportunity
+also closes the epoch race window. Harness knobs must be tuned to maximise the
+failure rate of the **control**, never the reach of the detector.
+
+---
+
 ## Methodology
+
 
 Both modes run the identical race and differ *only* in how a use-after-free is
 detected. The epoch implementation is never modified, and the harness contributes no
@@ -634,6 +790,115 @@ memory is released.
 | [`tla/epoch/LightEpoch.tla`](tla/epoch/LightEpoch.tla) | The trace above. **VIOLATED.** |
 | [`tla/epoch/LightEpochResumeAndRefresh.tla`](tla/epoch/LightEpochResumeAndRefresh.tla) | Tsavorite's per-operation sequence. **VIOLATED.** |
 | [`tla/epoch/fixes/`](tla/epoch/fixes) | The same two specs with the barrier added. **HOLD.** |
+| [`tla/tsavorite/`](tla/tsavorite) | Two **real Tsavorite flows** run against each other, with Tsavorite's own barriers included. See below. |
 
 Each epoch spec is built on top of `StoreBuffer.tla`.
+
+## "But Tsavorite already adds the barrier anyway"
+
+The most common objection to fixing `LightEpoch` is that it does not matter in
+practice: whatever `LightEpoch` omits, Tsavorite's own interlocked operations
+supply, so the announce is fenced by the time it matters.
+
+That objection is **true for some Tsavorite flows and false for others**, and
+the specs in [`tla/tsavorite/`](tla/tsavorite) pin down exactly where the line
+falls. Both threads run real Tsavorite call sequences, and *every* interlocked
+operation Tsavorite actually performs on those paths is modelled as a full
+StoreLoad barrier — a deliberately generous reading of the objection.
+
+The reclaimer is the same in all three specs: `AllocatorBase.ShiftHeadAddress`,
+which fences twice (`MonotonicUpdate`'s `Interlocked.CompareExchange`, then
+`BumpCurrentEpoch`'s `Interlocked.Increment`) before draining `OnPagesClosed` →
+`FreePage`. Only the reader flow changes.
+
+| Spec | Reader flow | Fence between announce and deref? | `tso` | `arm` |
+| --- | --- | --- | --- | --- |
+| [`TsavoriteReadAtAddress.tla`](tla/tsavorite/TsavoriteReadAtAddress.tla) | `BasicContext.ReadAtAddress` → `InternalReadAtAddress` | **none** | **VIOLATED** | **VIOLATED** |
+| [`TsavoriteReadWithBucketLatch.tla`](tla/tsavorite/TsavoriteReadWithBucketLatch.tla) | `BasicContext.Read` → `InternalRead` | yes — `HashBucket.TryAcquireSharedLatch` CAS | HOLDS | HOLDS |
+| [`TsavoriteTransactionalRead.tla`](tla/tsavorite/TsavoriteTransactionalRead.tla) | `TransactionalContext.Read` → **the same** `InternalRead` | **none** — `TransactionalSessionLocker` takes no latch | **VIOLATED** | **VIOLATED** |
+| [`TsavoriteLogScanGetNext.tla`](tla/tsavorite/TsavoriteLogScanGetNext.tla) | `TsavoriteLogScanIterator.GetNext` | **none** | **VIOLATED** | **VIOLATED** |
+| [`fixes/FixedTsavoriteReadAtAddress.tla`](tla/tsavorite/fixes/FixedTsavoriteReadAtAddress.tla) | `ReadAtAddress` on a fixed `LightEpoch` | yes — the fence in the announce itself | HOLDS | HOLDS |
+
+Each spec gives the **same verdict under both memory models**. The memory model
+is not the variable here — the flow is. The two reader flows differ in one
+respect only: whether an interlocked operation happens to sit between the epoch
+announce and the dereference of the epoch-protected page.
+
+`InternalRead` takes an ephemeral shared bucket latch
+(`FindTagAndTryEphemeralSLock` → `HashBucket.TryAcquireSharedLatch`, an
+`Interlocked.CompareExchange`) before it touches the hybrid log. That CAS drains
+the reader's store buffer, so the announce is visible to the reclaimer's
+min-scan. The flow is safe — **by accident**. Nothing about that lock exists for
+reclamation safety; it is concurrency control for the hash bucket.
+
+`InternalReadAtAddress` takes no such latch. It says so explicitly:
+
+> `// We do things in a different order here than in InternalRead, in part to handle NoKey (especially with Revivification).`
+
+It checks the plain field `hlogBase.HeadAddress` (`public long`, not `volatile`)
+and then calls `CreateLogRecord` → `GetPhysicalAddress` →
+`*(pagePointers + pageIndex)`. Between the two announce stores and that
+dereference there is no interlocked operation, no volatile access, and no
+fence — so the store-buffer window is wide open, and TLC finds the
+use-after-free **under plain x86-TSO**, not only under the weaker `arm` model.
+
+The same gap exists on other paths, and they are modelled above rather than
+merely asserted:
+
+**Transactional sessions lose the accidental fence entirely.** `TryEphemeralSLock`
+dispatches through `ISessionLocker`. Transactional sessions bind
+`TransactionalSessionLocker`, whose `TryLockEphemeralShared` is:
+
+```csharp
+public bool TryLockEphemeralShared(... ref stackCtx)
+{
+    Debug.Assert(store.LockTable.IsLocked(ref stackCtx.hei), ...);
+    return true;
+}
+```
+
+No interlocked operation, no lock, no barrier — and `Debug.Assert` is compiled
+out in Release, so in a shipping build the method is literally `return true`.
+`Helpers.cs` states the reason outright: *"Manual locking already automatically
+locks the bucket"* — the bucket was latched back at `BeginTransaction`, so no CAS
+runs per operation. Those earlier locks cannot help: `TransactionalContext` calls
+`UnsafeResumeThread` on **every** operation, so the announce store is issued
+*after* them, and a barrier in the past cannot order a store in the future.
+`TsavoriteTransactionalRead.tla` runs the *same* `InternalRead` code over the
+*same* allocator with the *same* reclaimer as the spec that HOLDS, and it is
+VIOLATED. The only variable is which session type the caller happened to pick.
+
+**Scan and iterator paths take no bucket latch at all**, because there is no hash
+bucket involved. `TsavoriteLogScanIterator.GetNext` calls `epoch.Resume()`, reads
+the plain field `allocator.HeadAddress`, and dereferences
+`allocator.GetPhysicalAddress(currentAddress)` — with nothing in between. It does
+not even call `InternalRefresh`, so this flow is *weaker* than `ReadAtAddress`.
+The same shape recurs in five further `GetNext`/`GetNextRaw` overloads on that
+class, and in `SpanByteScanIterator`/`ObjectScanIterator`, which back `Log.Scan`
+and compaction. The main-store iterator even documents the guarantee it is
+relying on:
+
+> `// Acquire the epoch BEFORE sampling Initializing / TailAddress / HeadAddress / pagePointers, so that any allocator state we read is consistent with the epoch we hold.`
+
+That comment is exactly what the missing fence invalidates. Source order is not
+visibility order: the announce can still be sitting in the store buffer while
+those loads execute, so the allocator state read is *not* consistent with the
+epoch held, and the reclaimer's min-scan never sees the iterator.
+
+For balance, the paths that *are* safe: basic-session `Read`/`Upsert`/`RMW`/
+`Delete` and all the pending-IO completion paths (`ContinuePendingRead`,
+`ContinuePendingRMW`, `CompletePendingAsync`) do reach a `HashBucket` CAS before
+any dereference. The bug is not everywhere — it is in whichever flows happen to
+miss an unrelated lock.
+
+Note also that `FreePage` is `ClearPage` (`Array.Clear`) plus an optional return
+to a page pool — the page is *recycled*, not unmapped. The reader does not
+fault; it silently reads zeroed or re-used bytes as a live record.
+
+So "Tsavorite adds the barrier anyway" is not a property of Tsavorite. It is a
+property of one code path, produced by a lock taken for unrelated reasons, that
+no comment or test enforces, and that disappears the moment the caller switches
+session type or iterates the log. Fixing `LightEpoch` covers every caller at
+once; the alternative is auditing each flow individually and keeping that audit
+correct forever.
 

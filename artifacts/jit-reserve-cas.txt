@@ -1,0 +1,82 @@
+bare LightEpoch repro  impl=casannounce  rounds=2  deref=1  pairs=1  reclaimerDelay=0
+epoch sequence: Resume() -> access -> Suspend()
+OS=Microsoft Windows 10.0.26200  Arch=X64  physicalCores=12 logicalProcessors=20 smtCores=8 numaNodes=1
+ordering knobs: LE_ACQUIRE_ORDER=cas  LE_REFRESH_ORDER=acqload
+detection: quarantine (page pool + poison sentinel; no syscall in the race loop)
+reclaimer: protected (Resume + Refresh each round), as Tsavorite drives the epoch in production
+pair 0: cores(reclaimer=0,reader=2)
+ops = cas-announce (FixedLightEpochWithCasAnnounce)
+; Assembly listing for method LightEpoch.Core.FixedLightEpochWithCasAnnounce:ReserveEntryForThread(byref,long):this (FullOpts)
+; Emitting BLENDED_CODE for generic X64 + VEX on Windows
+; FullOpts code
+; optimized code
+; rsp based frame
+; fully interruptible
+; No PGO data
+
+G_M000_IG01:                ;; offset=0x0000
+       push     rdi
+       push     rsi
+       push     rbp
+       push     rbx
+       sub      rsp, 40
+       mov      rbx, rcx
+       mov      rsi, rdx
+       mov      rdi, r8
+ 
+G_M000_IG02:                ;; offset=0x0011
+       mov      rax, qword ptr GS:[0x0058]
+       mov      rbp, qword ptr [rax+0x50]
+       add      rbp, 640
+       cmp      dword ptr [rbp+0x10], 0
+       jne      SHORT G_M000_IG04
+ 
+G_M000_IG03:                ;; offset=0x002B
+       call     System.Environment:get_CurrentManagedThreadId():int
+       mov      dword ptr [rbp+0x10], eax
+ 
+G_M000_IG04:                ;; offset=0x0033
+       cmp      word  ptr [rbp+0x14], 0
+       je       SHORT G_M000_IG06
+ 
+G_M000_IG05:                ;; offset=0x003A
+       cmp      word  ptr [(reloc 0x7ff976bbb112)], 0
+       je       SHORT G_M000_IG07
+ 
+G_M000_IG06:                ;; offset=0x0044
+       mov      ecx, dword ptr [rbp+0x10]
+       call     [LightEpoch.Core.Utility:Murmur3(int):int]
+       mov      ecx, eax
+       movzx    rax, word  ptr [(reloc 0x7ff976bbb112)]
+       mov      edx, 128
+       test     eax, eax
+       cmovne   edx, eax
+       movzx    r8, dx
+       mov      eax, ecx
+       xor      edx, edx
+       div      edx:eax, r8d
+       inc      edx
+       mov      word  ptr [rbp+0x14], dx
+       mov      eax, ecx
+       shr      eax, 16
+       xor      edx, edx
+       div      edx:eax, r8d
+       inc      edx
+       mov      word  ptr [rbp+0x16], dx
+ 
+G_M000_IG07:                ;; offset=0x0081
+       mov      rcx, rbx
+       mov      rdx, rsi
+       mov      r8, rdi
+ 
+G_M000_IG08:                ;; offset=0x008A
+       add      rsp, 40
+       pop      rbx
+       pop      rbp
+       pop      rsi
+       pop      rdi
+       tail.jmp [LightEpoch.Core.FixedLightEpochWithCasAnnounce:ReserveEntry(byref,long):this]
+ 
+; Total bytes of code 152
+
+Completed 2 rounds in 0.0s with NO violation. sampledRounds=0 drains=2 quarantined=2 sink=0

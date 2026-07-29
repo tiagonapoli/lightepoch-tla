@@ -1,0 +1,2 @@
+﻿USE-AFTER-FREE: reader read a quarantined page while protected. violations=2 firstRound=409,701 lastRound=544,368 deciles=[0 0 0 0 1 1 0 0 0 0] elapsed=1.4s
+

@@ -1,0 +1,9 @@
+﻿Resume + Refresh repro  impl=casannounce  rounds=1,000,000  deref=20000  pairs=1  reclaimerDelay=0
+epoch sequence: Resume() -> InternalRefresh()/ProtectAndDrain() -> access -> Suspend()
+OS=Microsoft Windows 10.0.26200  Arch=X64  physicalCores=12 logicalProcessors=20 smtCores=8 numaNodes=1
+detection: quarantine (page pool + poison sentinel; no syscall in the race loop)
+reclaimer: protected (Resume + Refresh each round), as Tsavorite drives the epoch in production
+pair 0: cores(reclaimer=0,reader=2)
+ops = cas-announce (FixedLightEpochWithCasAnnounce)
+Completed 1,000,000 rounds in 2.5s with NO violation. sampledRounds=93,749 drains=1,000,000 quarantined=1,000,000 sink=102380433815589
+

@@ -1,0 +1,9 @@
+﻿bare LightEpoch shared-epoch repro  impl=casannounce  rounds=500,000  deref=5000  readers=8  slotSpace=2  reclaimerDelay=0
+epoch sequence: Resume() -> access -> Suspend()
+OS=Microsoft Windows 10.0.26200  Arch=X64  physicalCores=12 logicalProcessors=20 smtCores=8 numaNodes=1
+detection: unmap (VirtualFree MEM_RELEASE; a fault is a hardware access violation)
+topology: ONE shared epoch instance; reclaimer=core 0, readers=cores 2,4,6,8,10,12,14,16
+ops = cas-announce (FixedLightEpochWithCasAnnounce)
+Completed 500,000 rounds in 4.0s with NO fault. sink=10384208380
+slot reuse: 8/8 slots held by >1 thread, max 8 distinct threads on one slot
+

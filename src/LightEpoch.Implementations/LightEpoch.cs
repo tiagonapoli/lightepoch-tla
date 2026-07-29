@@ -97,6 +97,14 @@ namespace LightEpoch.Core
         static readonly ushort kTableSize = Math.Max((ushort)128, (ushort)(Environment.ProcessorCount * 2));
 
         /// <summary>
+        /// Test-only. When non-zero, every thread's home offsets are hashed into just this
+        /// many slots instead of the whole table, so distinct threads repeatedly claim the
+        /// slot another thread just released. Production hashing spreads threads over 128
+        /// entries, making cross-thread slot reuse too rare to exercise on hardware.
+        /// </summary>
+        internal static ushort TestSlotSpace;
+
+        /// <summary>
         /// Default drainlist size
         /// </summary>
         const int kDrainListSize = 16;
@@ -270,6 +278,19 @@ namespace LightEpoch.Core
         {
             ref var entry = ref Metadata.Entries.GetRef(instanceId);
             return kInvalidIndex != entry && (*(tableAligned + entry)).threadId == Metadata.threadId;
+        }
+
+        /// <summary>
+        /// Test-only. The table index this thread currently holds, so a harness can verify
+        /// that distinct threads really do recycle the same slot.
+        /// </summary>
+        internal int ThisThreadEntry() => Metadata.Entries.GetRef(instanceId);
+
+        /// <summary>Tripwire diagnostic: the epoch this thread currently announces, or 0 if unprotected.</summary>
+        internal long ThisThreadAnnouncedEpoch()
+        {
+            var entry = Metadata.Entries.GetRef(instanceId);
+            return entry == kInvalidIndex ? 0 : (*(tableAligned + entry)).localCurrentEpoch;
         }
 
         /// <summary>
@@ -689,11 +710,17 @@ namespace LightEpoch.Core
         void ReserveEntryForThread(ref int entry)
         {
             if (Metadata.threadId == 0) // run once per thread for performance
-            {
                 Metadata.threadId = Environment.CurrentManagedThreadId;
+
+            // TryAcquireEntry's probe loop advances startOffset1, so under TestSlotSpace the home
+            // offsets are re-seeded on every acquire. Without this each thread drifts onto a
+            // private slot within a few rounds and the cross-thread reuse under test disappears.
+            if (Metadata.startOffset1 == 0 || TestSlotSpace != 0)
+            {
                 var code = (uint)Utility.Murmur3(Metadata.threadId);
-                Metadata.startOffset1 = (ushort)(1 + (code % kTableSize));
-                Metadata.startOffset2 = (ushort)(1 + ((code >> 16) % kTableSize));
+                var span = TestSlotSpace == 0 ? kTableSize : TestSlotSpace;
+                Metadata.startOffset1 = (ushort)(1 + (code % span));
+                Metadata.startOffset2 = (ushort)(1 + ((code >> 16) % span));
             }
             ReserveEntry(ref entry);
         }

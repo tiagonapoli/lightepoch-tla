@@ -1,0 +1,78 @@
+Resume + Refresh repro  impl=casannounce  rounds=2  deref=1  pairs=1  reclaimerDelay=0
+epoch sequence: Resume() -> InternalRefresh()/ProtectAndDrain() -> access -> Suspend()
+OS=Microsoft Windows 10.0.26200  Arch=X64  physicalCores=12 logicalProcessors=20 smtCores=8 numaNodes=1
+detection: quarantine (page pool + poison sentinel; no syscall in the race loop)
+reclaimer: protected (Resume + Refresh each round), as Tsavorite drives the epoch in production
+pair 0: cores(reclaimer=0,reader=2)
+ops = cas-announce (FixedLightEpochWithCasAnnounce)
+; Assembly listing for method LightEpoch.Core.FixedLightEpochWithCasAnnounce:ProtectAndDrain():this (FullOpts)
+; Emitting BLENDED_CODE for generic X64 + VEX on Windows
+; FullOpts code
+; optimized code
+; rsp based frame
+; partially interruptible
+; No PGO data
+
+G_M000_IG01:                ;; offset=0x0000
+       push     rbx
+       sub      rsp, 32
+       mov      rbx, rcx
+ 
+G_M000_IG02:                ;; offset=0x0008
+       mov      rcx, qword ptr GS:[0x0058]
+       mov      rcx, qword ptr [rcx+0x50]
+       cmp      dword ptr [rcx+0x238], 6
+       jle      SHORT G_M000_IG09
+       mov      rcx, gword ptr [rcx+0x240]
+       mov      rax, bword ptr [rcx+0x30]
+       test     rax, rax
+       je       SHORT G_M000_IG09
+ 
+G_M000_IG03:                ;; offset=0x002E
+       mov      rcx, gword ptr [rax+0x10]
+       add      rcx, 8
+       mov      edx, dword ptr [rbx+0x48]
+       call     [LightEpoch.Core.FixedLightEpochWithCasAnnounce+InstanceIndexBuffer:GetRef(int):byref:this]
+       mov      rdx, qword ptr [rbx+0x28]
+       movsxd   rcx, dword ptr [rax]
+       shl      rcx, 6
+       mov      r8, qword ptr [rbx+0x30]
+       mov      qword ptr [rdx+rcx], r8
+       lock     
+       or       dword ptr [rsp], 0
+       cmp      dword ptr [rbx+0x44], 0
+       jle      SHORT G_M000_IG05
+ 
+G_M000_IG04:                ;; offset=0x005D
+       mov      rdx, qword ptr [rbx+0x28]
+       movsxd   rcx, dword ptr [rax]
+       shl      rcx, 6
+       mov      rdx, qword ptr [rdx+rcx]
+       mov      rcx, rbx
+       call     [LightEpoch.Core.FixedLightEpochWithCasAnnounce:Drain(long):this]
+ 
+G_M000_IG05:                ;; offset=0x0075
+       cmp      dword ptr [rbx+0x40], 0
+       jg       SHORT G_M000_IG07
+ 
+G_M000_IG06:                ;; offset=0x007B
+       add      rsp, 32
+       pop      rbx
+       ret      
+ 
+G_M000_IG07:                ;; offset=0x0081
+       mov      rcx, rbx
+ 
+G_M000_IG08:                ;; offset=0x0084
+       add      rsp, 32
+       pop      rbx
+       tail.jmp [LightEpoch.Core.FixedLightEpochWithCasAnnounce:SuspendResume():this]
+ 
+G_M000_IG09:                ;; offset=0x008F
+       mov      ecx, 6
+       call     CORINFO_HELP_GETDYNAMIC_GCTHREADSTATIC_BASE_NOCTOR_OPTIMIZED
+       jmp      SHORT G_M000_IG03
+ 
+; Total bytes of code 155
+
+Completed 2 rounds in 0.0s with NO violation. sampledRounds=0 drains=2 quarantined=2 sink=0
