@@ -52,6 +52,7 @@ The bug is demonstrated in two complementary ways:
   * [The one thing blocking removal](#the-one-thing-blocking-removal)
 * [Other ordering defects in the same class](#other-ordering-defects-in-the-same-class)
   * [The lost wakeup, and two wrong answers on the way to it](#the-lost-wakeup-and-two-wrong-answers-on-the-way-to-it)
+  * [What the fix costs](#what-the-fix-costs)
 
 ---
 
@@ -566,8 +567,20 @@ the shell's ability to report that status, whereas one parsed from the program's
 own output is self-describing.** Prefer instruments that say what they observed
 over instruments that say only whether something died.
 
-The sharpest example: tuning `--reclaimer-delay` to maximise how often the
-reader is mid-dereference when a page is reclaimed looks like a large sensitivity
+One more instance appeared in the *benchmark*, and it is the subtlest, because a
+null result is exactly what one of these measurements was supposed to produce.
+Pricing the drain-list release store against a plain store showed no difference —
+correctly, as it turns out, but not for the reason the measurement supplied. The
+contended harness's inner loop is `Resume(); Refresh(); Suspend();` and never
+calls `BumpCurrentEpoch(Action)`, so the sites under test never executed. The
+measurement showed that the instrument could not see the change, and "no
+difference" and "no coverage" are indistinguishable in the output. A null result
+needs a positive control every bit as much as a crash verdict does: something
+that *would* have moved the number, to demonstrate the number can move. The claim
+was re-established from disassembly instead, which does not depend on how often
+the site runs.
+
+The sharpest example: tuning `--reclaimer-delay` to maximise how often thereader is mid-dereference when a page is reclaimed looks like a large sensitivity
 win, and is worthless. Holding the command and core pinning fixed and varying
 only the delay, on the **known-buggy** baseline:
 
@@ -1206,8 +1219,17 @@ interlocked operation after them whatsoever.
 A drainer can therefore observe the new epoch, win the claim CAS, and read
 `action` as `null` or as the previous delegate — a `NullReferenceException` inside
 reclamation, or a stale reclamation action run twice, which for a hybrid-log page
-is a double free. The fix is a release store on the publish; it is free on x86,
-one `stlr` on ARM64, and every one of the three sites is cold.
+is a double free. The fix is a release store on the publish, and it is free: both
+spellings compile to identical x86-64 machine code, so the change is one
+`stlr`-for-`str` substitution on ARM64 and nothing at all elsewhere.
+
+That last claim is worth a note on how it was established, because the obvious
+route to it is vacuous. Benchmarking the two spellings showed no difference — but
+the contended harness's inner loop is `Resume(); Refresh(); Suspend();` and never
+calls `BumpCurrentEpoch(Action)`, so the three sites never execute during the
+measurement. The null result showed the benchmark could not *see* the site, not
+that the fix was cheap. The defensible evidence is the disassembly, which does
+not depend on drain frequency at all.
 
 **`Release()` unpublishes the slot with plain stores**, so prior loads from inside
 the protected region may sink past the store that declares the slot free. The
@@ -1281,4 +1303,42 @@ is unreachable until the epoch table is full, which needs more concurrently
 protected threads than `max(128, 2 × ProcessorCount)`. Garnet does not do that
 today. The unstated assumption keeping it safe is "the table is never full", and
 that assumption is written down nowhere.
+
+What makes it worth recording is that the code already *anticipates* this exact
+race and mitigates it with something that cannot work. `ReserveEntryWait`
+re-probes the slot after registering, and says why (`:648-651`):
+
+> `// Re-check for free slot after incrementing waiterCount. This avoids us waiting on the semaphore forever in case we increment waiterCount immediately after the epoch releaser sees a zero waiterCount (and therefore does not release the semaphore).`
+
+That is the right hazard, and the re-check would close it if the two threads'
+operations were ordered against each other. They are not: the waiter's
+`Interlocked.Increment` fences the waiter's *own* pair, but nothing forces the
+releaser's clearing store to become visible before the releaser's load of
+`waiterCount`. Both sides may read stale simultaneously, which is the definition
+of `SB`, and a re-check on one side cannot repair a missing edge on the other.
+
+### What the fix costs
+
+Two repairs are available, and they price very differently on the per-operation
+path (measured on the x86 box, paired against a live control in the same batch):
+
+| Repair | Cost | Verdict |
+|---|---:|---|
+| publish with `Volatile.Write` (release store) | **0** — byte-identical x86 codegen | take it |
+| publish with `Interlocked.Exchange` (`swpal`) | **+6.5 ns / +75%** | avoid |
+| bound the sleep: `waiterSemaphore.Wait(timeout, …)` | **0** — slow path only | recommended |
+
+The release store is free because on x86-64 a release store *is* a plain `mov`;
+disassembling both spellings of the publish gives identical machine code, so the
+cost is one `stlr`-for-`str` substitution on ARM64 and literally nothing
+elsewhere. The `Interlocked.Exchange` spelling is the expensive one: `xchg` must
+take the actively contended slot line exclusive, where a `MemoryBarrier`'s `lock
+or [rsp],0` touches the thread's own always-local stack line — the same "one
+locked instruction" on paper, and 55% worse than the redundant barrier it was
+proposed to replace.
+
+Bounding the wait is the recommendation regardless of how the codegen question
+resolves. It converts a permanent hang into a bounded delay under *every* reading
+of the memory model, costs nothing because it is on the table-full slow path, and
+does not depend on which acquire instruction the JIT selects.
 

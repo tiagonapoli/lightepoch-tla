@@ -228,8 +228,34 @@ namespace LightEpoch.Micro
             Warm<FullBarrierOps>();
             Console.WriteLine("warming cas-announce...");
             Warm<CasAnnounceOps>();
+            Console.WriteLine("warming store spellings...");
+            WarmStoreSpellings();
             Console.WriteLine("done");
         }
+
+        static long plainSlot, volatileSlot;
+
+        /// <summary>
+        /// Isolates the two spellings of the drain-list publish store (U3) so their emitted code can
+        /// be compared directly. The contended harness never calls <c>BumpCurrentEpoch(Action)</c>,
+        /// so it cannot price that site; this can.
+        /// </summary>
+        static void WarmStoreSpellings()
+        {
+            for (var i = 0; i < 2_000_000; i++)
+            {
+                PublishPlain(i);
+                PublishVolatile(i);
+            }
+
+            Thread.Sleep(400);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static void PublishPlain(long v) => plainSlot = v;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static void PublishVolatile(long v) => Volatile.Write(ref volatileSlot, v);
 
         private static void Warm<TOps>() where TOps : struct, IEpochOps
         {
