@@ -493,6 +493,15 @@ expected to fail:
 * The non-LSE codegen path has been exercised on hardware, but that batch had no
   live sensitivity control, so under the rule below it currently proves nothing.
   (The non-LSE path *is* covered formally, by the composed litmus above.)
+* **Whether the fix is itself exposed to the lost wakeup** described later under
+  [Other ordering defects](#other-ordering-defects-in-the-same-class). Production
+  is unconditionally exposed, and the fix escapes only if the `waiterCount` probe
+  in `Release()` emits `ldar` rather than `ldapr` — `STLR;LDAR` is forbidden but
+  `STLR;LDAPR` is allowed. The table above shows this JIT emitting `ldapr` for
+  `Volatile.Read`, which suggests the probe is `ldapr` too and the fix therefore
+  needs an `Interlocked.Exchange` release. That is deliberately **not** being
+  inferred: it is the same one-half-of-the-pair mistake documented below, and it
+  is waiting on a disassembly of `Release()` itself.
 
 `WeakMemory.tla` cannot decide the RCsc/RCpc question either way — its acquire
 abstraction does not distinguish the two, and says so in a comment at
