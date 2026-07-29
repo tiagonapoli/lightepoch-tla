@@ -47,6 +47,8 @@ The bug is demonstrated in two complementary ways:
   * [The same trace, step by step](#the-same-trace-step-by-step)
   * [Reading the model yourself](#reading-the-model-yourself)
 * ["But Tsavorite already adds the barrier anyway"](#but-tsavorite-already-adds-the-barrier-anyway)
+* [Other ordering defects in the same class](#other-ordering-defects-in-the-same-class)
+  * [The lost wakeup that turned on one instruction](#the-lost-wakeup-that-turned-on-one-instruction)
 
 ---
 
@@ -1075,4 +1077,105 @@ no comment or test enforces, and that disappears the moment the caller switches
 session type or iterates the log. Fixing `LightEpoch` covers every caller at
 once; the alternative is auditing each flow individually and keeping that audit
 correct forever.
+
+---
+
+## Other ordering defects in the same class
+
+Auditing every ordering construct in the production class — rather than only the
+announce — turned up three more sites. They are recorded here because two of them
+are independent of the bug this document is about, and one of them is a
+cautionary tale about how easy it is to get this reasoning wrong.
+
+First, a negative result worth stating plainly: **the hot path is under-fenced,
+not over-fenced.** `ProtectAndDrain`'s fast path contains no barrier at all — one
+plain load, one plain store, two volatile reads — so there is nothing there to
+remove. The single `Thread.MemoryBarrier()` in the class, in `SuspendDrain`, is
+genuinely required *on x86 as well as ARM64*: it closes an `SB` pair between one
+thread clearing its own slot and another scanning for the minimum, and x86-TSO
+permits StoreLoad reordering. It is also on a cold path, since drain actions fire
+at page or checkpoint granularity. Keep it exactly where it is.
+
+**The drain list is published with plain stores.** `BumpCurrentEpoch` writes the
+payload and then the field that publishes it:
+
+```csharp
+drainList[i].action = onDrain;              // plain store — the payload
+drainList[i].epoch  = PriorEpoch;           // plain store — the publish
+_ = Interlocked.Increment(ref drainCount);  // fence, but after both — orders nothing
+```
+
+This is message passing with no release on the writer side, so the publishing
+store may be reordered ahead of the payload by the JIT on any architecture, or by
+ARM64 hardware. The interlocked increment does not save it: a fence placed *after*
+both stores orders them against everything that follows, but says nothing about
+their visibility relative to *each other*. Nor does the `drainCount > 0` gate that
+guards every call into `Drain`, because a drainer already in flight — or one
+admitted by a different slot's increment — has no ordering dependency on this
+slot at all. The second branch of the same function, which reuses a reclaimable
+slot at `:412-413`, performs the identical pair of plain stores with no
+interlocked operation after them whatsoever.
+
+A drainer can therefore observe the new epoch, win the claim CAS, and read
+`action` as `null` or as the previous delegate — a `NullReferenceException` inside
+reclamation, or a stale reclamation action run twice, which for a hybrid-log page
+is a double free. The fix is a release store on the publish; it is free on x86,
+one `stlr` on ARM64, and every one of the three sites is cold.
+
+**`Release()` unpublishes the slot with plain stores**, so prior loads from inside
+the protected region may sink past the store that declares the slot free. The
+realistic threat here is the compiler rather than the hardware, and it applies on
+both architectures — the .NET memory model explicitly permits reordering ordinary
+accesses, so the once-common belief that plain stores carry release semantics on
+the CLR gives no protection.
+
+### The lost wakeup that turned on one instruction
+
+The third finding is the interesting one, because the first analysis of it was
+wrong in an instructive way. `Release()` and `ReserveEntryWait()` form an `SB`
+pair:
+
+| Releaser (`Release`) | Waiter (`ReserveEntryWait`) |
+|---|---|
+| publish slot free | `Interlocked.Increment(waiterCount)` — full fence |
+| load `waiterCount`; if `> 0`, signal | re-probe the slot; if still taken, sleep |
+
+If the releaser reads a stale `0` while the waiter reads a stale non-zero, nobody
+signals and the waiter sleeps forever on a slot that is free. The natural
+argument is that this is unconditional: a volatile read is only an acquire load,
+and acquire does not close store buffering — the same argument this document uses
+to reject the release-store candidate for the announce.
+
+That argument is right about the .NET memory model and **wrong about the code
+AArch64 actually emits**, because AArch64 acquire/release are RCsc: an `LDAR` may
+not be reordered before an earlier `STLR`, so the pair supplies StoreLoad ordering
+by itself. `LDAPR` is RCpc and drops exactly that edge. Under ARM's official
+`aarch64.cat`:
+
+| Releaser | Waiter's RMW | Verdict |
+|---|---|---|
+| `STLR ; LDAR` | `LDADDAL` | **Never 0 7** — forbidden |
+| `STLR ; LDAPR` | `LDADDAL` | **Sometimes 3 7** — the hang is real |
+| `SWPAL ; LDAR` | `LDADDAL` | Never 0 7 |
+| `STLR ; DMB ISH ; LDAR` | `LDADDAL` | Never 0 7 |
+| `STLR ; LDAR` — **control** | `LDADD` (relaxed) | **Sometimes 3 7** |
+
+The last row is the sensitivity control, and it is what makes the three
+forbidden verdicts worth anything: weakening the waiter's RMW does produce the
+hang, so the litmus can express the outcome.
+
+So whether this hang exists is not a question about the algorithm at all. It is a
+question about which instruction the JIT selects for one volatile read, on a core
+that implements `FEAT_LRCPC` and may legitimately choose either. Two lessons
+generalise. Reasoning at the memory-model level tells you what is *permitted*, and
+that is the right level for deciding what to fix — but it does not tell you what a
+given target *exhibits*, and conflating the two produces confident claims in both
+directions. And an acquire load is not one thing: RCsc and RCpc acquire differ
+precisely on the edge that store buffering depends on.
+
+Graded honestly, this one is liveness only, with no memory-safety consequence, and
+it is unreachable until the epoch table is full — which needs more concurrently
+protected threads than `max(128, 2 × ProcessorCount)`. Garnet does not do that
+today. The unstated assumption keeping it safe is "the table is never full", and
+that assumption is written down nowhere.
 
