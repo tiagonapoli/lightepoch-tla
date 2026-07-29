@@ -500,9 +500,11 @@ expected to fail:
   in `Release()` emits `ldar` rather than `ldapr` — `STLR;LDAR` is forbidden but
   `STLR;LDAPR` is allowed. The table above shows this JIT emitting `ldapr` for
   `Volatile.Read`, which suggests the probe is `ldapr` too and the fix therefore
-  needs an `Interlocked.Exchange` release. That is deliberately **not** being
-  inferred: it is the same one-half-of-the-pair mistake documented below, and it
-  is waiting on a disassembly of `Release()` itself.
+  does not escape either. This is deliberately **not** being inferred: it is the
+  same one-half-of-the-pair mistake documented below, and it is waiting on a
+  disassembly of `Release()` itself. Note that the recommended repair — bounding
+  the sleep — is correct either way, so this question affects the description of
+  the hazard rather than the choice of fix.
 
 `WeakMemory.tla` cannot decide the RCsc/RCpc question either way — its acquire
 abstraction does not distinguish the two, and says so in a comment at
@@ -1289,7 +1291,13 @@ So the conclusion is the opposite of the one I published a few hours earlier.
 **In production the lost wakeup is real and unconditional on AArch64**, and does
 not depend on the unresolved `ldar`/`ldapr` codegen question at all. That question
 only ever decided whether the *fixed* implementation is also exposed — and because
-the fix publishes with `Volatile.Write`, it is not.
+the fix publishes with `Volatile.Write`, it is not, at least on the RCsc reading.
+
+It is also not confined to ARM64. `SB` is precisely the reordering x86-TSO
+permits, and on x86 both the publish and the volatile probe are plain `mov`
+instructions, so nothing orders them. The litmus tests above are AArch64 because
+that is what `aarch64.cat` models, but the hazard itself is architecture-neutral,
+and that is what drives the choice of repair below.
 
 Two lessons generalise, and the second is the one that caught me. Reasoning at the
 memory-model level tells you what is *permitted*, which is the right level for
@@ -1319,26 +1327,31 @@ of `SB`, and a re-check on one side cannot repair a missing edge on the other.
 
 ### What the fix costs
 
-Two repairs are available, and they price very differently on the per-operation
-path (measured on the x86 box, paired against a live control in the same batch):
+This one is not ARM-specific, which narrows the repair options considerably.
+`SB` is the canonical reordering that **x86-TSO also permits** — it is the same
+pattern that makes the `Thread.MemoryBarrier()` in `SuspendDrain` necessary on
+x86 — and on x86-64 a release store is a plain `mov`. So spelling the publish
+`Volatile.Write` does nothing for this hazard on x86, and on ARM64 it helps only
+under the RCsc reading. Measured on the x86 box, paired against a live control in
+the same batch:
 
-| Repair | Cost | Verdict |
+| Repair | Cost | Closes the hang? |
 |---|---:|---|
-| publish with `Volatile.Write` (release store) | **0** — byte-identical x86 codegen | take it |
-| publish with `Interlocked.Exchange` (`swpal`) | **+6.5 ns / +75%** | avoid |
-| bound the sleep: `waiterSemaphore.Wait(timeout, …)` | **0** — slow path only | recommended |
+| publish with `Volatile.Write` (release store) | **0** — byte-identical x86 codegen | ARM64 only, and only if the probe is `ldar` |
+| publish with `Interlocked.Exchange` (`swpal`) | **+6.5 ns / +75%** | yes, everywhere — but far too expensive |
+| `Thread.MemoryBarrier()` between publish and probe | +4.2 ns / +48% | yes, everywhere — still on the hot path |
+| bound the sleep: `waiterSemaphore.Wait(timeout, …)` | **0** — slow path only | yes, everywhere |
 
-The release store is free because on x86-64 a release store *is* a plain `mov`;
-disassembling both spellings of the publish gives identical machine code, so the
-cost is one `stlr`-for-`str` substitution on ARM64 and literally nothing
-elsewhere. The `Interlocked.Exchange` spelling is the expensive one: `xchg` must
-take the actively contended slot line exclusive, where a `MemoryBarrier`'s `lock
-or [rsp],0` touches the thread's own always-local stack line — the same "one
-locked instruction" on paper, and 55% worse than the redundant barrier it was
-proposed to replace.
+The `Interlocked.Exchange` spelling is the expensive one: `xchg` must take the
+actively contended slot line exclusive, where a `MemoryBarrier`'s `lock or
+[rsp],0` touches the thread's own always-local stack line — the same "one locked
+instruction" on paper, and 55% worse than the barrier it was proposed to replace.
 
-Bounding the wait is the recommendation regardless of how the codegen question
-resolves. It converts a permanent hang into a bounded delay under *every* reading
-of the memory model, costs nothing because it is on the table-full slow path, and
-does not depend on which acquire instruction the JIT selects.
+So **bounding the wait is the recommendation**, and by some distance. It is the
+only repair that is both free and correct on every target: it costs nothing
+because it sits on the table-full slow path, it converts a permanent hang into a
+bounded delay under every reading of the memory model, and it depends neither on
+the architecture nor on which acquire instruction the JIT selects. The
+alternatives all pay a per-operation price on the hottest path in the system to
+fix a liveness bug that only manifests when the epoch table is full.
 
