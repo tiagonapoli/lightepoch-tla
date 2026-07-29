@@ -47,6 +47,9 @@ The bug is demonstrated in two complementary ways:
   * [The same trace, step by step](#the-same-trace-step-by-step)
   * [Reading the model yourself](#reading-the-model-yourself)
 * ["But Tsavorite already adds the barrier anyway"](#but-tsavorite-already-adds-the-barrier-anyway)
+* [Is `Entry.threadId` still needed?](#is-entrythreadid-still-needed)
+  * [A verdict that turned out to be a theorem](#a-verdict-that-turned-out-to-be-a-theorem)
+  * [The one thing blocking removal](#the-one-thing-blocking-removal)
 * [Other ordering defects in the same class](#other-ordering-defects-in-the-same-class)
   * [The lost wakeup that turned on one instruction](#the-lost-wakeup-that-turned-on-one-instruction)
 
@@ -1080,7 +1083,82 @@ correct forever.
 
 ---
 
-## Other ordering defects in the same class
+## Is `Entry.threadId` still needed?
+
+With the claim carried by a CAS on the epoch word itself, `threadId` no longer
+participates in acquiring a slot, and the natural question is whether the field
+can go.
+
+It never participated in reclamation. `ComputeNewSafeToReclaimEpoch` and
+`SuspendDrain` read `localCurrentEpoch` and nothing else, so no scan has ever
+consulted `threadId` to decide what is safe to free. Under the original code it
+served as the ownership word — `Interlocked.CompareExchange(ref entry.threadId,
+myTid, 0)` — with the epoch announced separately afterwards, and that split is
+exactly the bug. The fix collapses the two into one operation, at which point
+ownership rests on the claim CAS plus the thread-private entry index in
+`Metadata.Entries[instanceId]`. There is no ABA exposure, because the index is
+invalidated in the same operation that frees the slot. There is no reentrancy to
+protect either: `Acquire` asserts against nesting. Removing the field saves no
+memory, since `Entry` is `[StructLayout(LayoutKind.Explicit, Size = 64)]` for
+cache-line isolation and would stay 64 bytes.
+
+Four specs check this. `CasAnnounceNoThreadId` and
+`CasAnnounceTwoReadersNoThreadId` delete the field and hold; two controls on two
+independent axes fail, so the holds are not artifacts of removing the field the
+invariants were watching. `CasAnnounceNoThreadIdNoCas` fails on the *announce*
+axis and `CasAnnounceNoThreadIdStaleIndex` on the *ownership* axis — the latter
+adding a single action, a departing reader that issues a second `Release` through
+a token it failed to invalidate.
+
+### A verdict that turned out to be a theorem
+
+Something initially looked wrong with these runs: the `tso` and `arm`
+configurations explored *byte-identical* state spaces, where the same spec with
+`threadId` present explores 4.3× more states under `arm` than under `tso`. A
+relaxation knob that changes nothing usually means the knob is disconnected.
+
+It is not. `StoreBuffer`'s `arm` flush may retire *any* pending store, while `tso`
+retires only the head — so the two differ **only when a thread has two or more
+stores in flight**. In the version that keeps `threadId`, the reader has exactly
+two unfenced stores, publishing and clearing that field. Deleting it removes
+both, and with them every unfenced store the reader had; the CAS is atomic and
+the release is a single store. At one store in flight, `arm` and `tso` are the
+same model by construction.
+
+To make sure this was not hiding behind an over-strong model of the release —
+`CasAnnounceNoThreadId` models `Volatile.Write` as a full barrier, which is more
+than an `stlr` gives — `CasAnnounceNoThreadIdWeakRelease` weakens it to a store
+that may linger in the buffer. It holds, and still identically across both
+models, for the same structural reason. A release that lands late makes the slot
+look *occupied* for longer, which is the conservative direction: it can delay
+reclamation but never free under a live reader.
+
+So the equality is the finding. The fix works because it leaves store-order
+relaxation nothing to act on, and deleting `threadId` strengthens that rather
+than weakening it.
+
+### The one thing blocking removal
+
+`ThisInstanceProtected()` is `kInvalidIndex != entry && (*(tableAligned +
+entry)).threadId == Metadata.threadId` (`:272-276`). That second clause is doing
+real work, and not only in assertions — it gates control flow in
+`ThisInstanceProtectedAndSuspend` and `ResumeIfNeeded` (`:285`, `:355`).
+`Metadata.Entries` is thread-static and indexed by `instanceId`, and `Dispose()`
+recycles an `instanceId` without first checking that the table is empty. A thread
+that holds a stale index for a disposed instance can therefore name a live slot
+belonging to a *different* `LightEpoch` — and today the `threadId` comparison is
+what disqualifies it. Remove the field and `Release()` would wipe another
+thread's announcement, which is the original use-after-free by a different route.
+This is the hazard `CasAnnounceNoThreadIdStaleIndex` encodes, and it is why that
+control violates.
+
+The removal is therefore safe only alongside a generation stamp on the entry
+index, or a `Dispose()` that quiesces before recycling an `instanceId`. Since the
+field costs nothing in a 64-byte padded struct, the honest recommendation is to
+leave it in place and treat it as a debug assertion rather than as ownership
+state — the CAS is what makes the algorithm correct, and `threadId` should no
+longer be described as though it were.
+
 
 Auditing every ordering construct in the production class — rather than only the
 announce — turned up three more sites. They are recorded here because two of them
