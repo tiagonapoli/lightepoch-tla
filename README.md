@@ -1467,6 +1467,15 @@ must take the actively contended epoch slot exclusive while `lock or [rsp],0`
 touches the thread's own always-local stack line. Instruction counts are not
 costs.
 
+One further constraint is worth recording as a *do not weaken*, since it is
+currently satisfied by accident rather than by intent. The correctness of the
+fix depends on the reclaimer's epoch bump being a sequentially consistent RMW,
+not merely an atomic one: with the reader's acquire load in place, relaxing
+`BumpCurrentEpoch`'s `Interlocked.Increment` to a relaxed RMW flips the herd7
+verdict from forbidden back to allowed. Nothing in the source says so. Anyone
+optimising that increment to a weaker primitive would reintroduce the
+use-after-free while leaving the reader-side fix visibly intact.
+
 ### The one thing this study does not settle
 
 Every result here concerns whether a given ordering is *permitted* and whether it
