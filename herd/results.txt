@@ -981,3 +981,30 @@ Volatile.Write (STLR), it is not.
 
 Liveness only; no memory-safety consequence. Unreachable until the epoch table
 is full (needs more concurrently protected threads than max(128, 2*nproc)).
+
+================================================================================
+Refresh load strength: LDAR (RCsc) vs LDAPR (RCpc), and the writer's RMW
+================================================================================
+Model: /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat (herdtools7 7.58)
+
+The composed-fix result was verified with LDAPR because that is what the JIT
+actually emits for Volatile.Read on Neoverse N2. The relaxed-RMW control had
+only ever been run against LDAPR, which left it ambiguous whether that
+allowance was the RCpc weakening or the writer's bump. Filling in the missing
+cell (lightepoch_refresh_ldar_relaxed_rmw.litmus, new) settles it.
+
+  lightepoch_refresh_no_fence            LDR    + LDADDAL   Ok  Positive: 1 Negative: 7
+  lightepoch_refresh_ldar_compare        LDAR   + LDADDAL   No  Positive: 0 Negative: 6
+  lightepoch_refresh_ldapr               LDAPR  + LDADDAL   No  Positive: 0 Negative: 6
+  lightepoch_refresh_ldar_relaxed_rmw    LDAR   + LDADD     Ok  Positive: 1 Negative: 7
+  lightepoch_refresh_ldapr_relaxed_rmw   LDAPR  + LDADD     Ok  Positive: 1 Negative: 7
+
+LDAR and LDAPR agree in every cell. RCpc is sufficient here because the hazard
+needs only load->load ordering on the reader; the RCsc/RCpc difference concerns
+ordering against an earlier store-release, which this shape does not involve.
+
+The relaxed-RMW allowance is therefore a WRITER-side defect, not a reader-side
+one, and no strengthening of the reader's load repairs it. Production satisfies
+the writer side by construction: BumpCurrentEpoch uses Interlocked.Increment
+(LightEpoch.cs:368), which .NET specifies as sequentially consistent and which
+compiles to the AL form.

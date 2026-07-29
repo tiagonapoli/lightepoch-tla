@@ -483,19 +483,52 @@ difference concerns ordering against an *earlier store-release*, which this
 shape does not involve.
 
 Both rows carry live controls: replacing `LDAPR` with a plain `LDR` is
-**ALLOWED**, and making the writer's RMW relaxed flips `LDAPR` back to
-**ALLOWED** (`Sometimes 1 7`) — so the `FORBIDDEN` depends on the writer
-genuinely publishing `objectUnlinked` before `currentEpoch`, and is not an
-artifact of an over-constrained encoding.
+**ALLOWED** (`Sometimes 1 7`), and making the writer's RMW relaxed
+(`LDADDAL` → `LDADD`) flips the verdict back to **ALLOWED** — so the
+`FORBIDDEN` depends on the writer genuinely publishing `objectUnlinked` before
+`currentEpoch`, and is not an artifact of an over-constrained encoding.
+
+That second control initially looked like it might be the RCsc/RCpc difference
+showing up after all, since it was only ever run against `LDAPR`. It is not.
+Filling in the missing cell settles it — the four combinations form a clean
+double dissociation:
+
+| reader's refresh load | writer's bump | verdict |
+|---|---|---|
+| `LDR` (plain) | `LDADDAL` | Allowed `1 7` |
+| `LDAR` (RCsc) | `LDADDAL` | **Never `0 6`** |
+| `LDAPR` (RCpc) | `LDADDAL` | **Never `0 6`** |
+| `LDAR` (RCsc) | `LDADD` (relaxed) | Allowed `1 7` |
+| `LDAPR` (RCpc) | `LDADD` (relaxed) | Allowed `1 7` |
+
+`LDAR` and `LDAPR` agree in *every* cell. The acquire strength is what closes
+the reader side and RCpc is enough for it; the relaxed-RMW allowance is a
+**writer**-side defect that the reader cannot repair no matter how strong its
+load. Both requirements are real and neither substitutes for the other.
+
+The writer-side requirement is satisfied by construction in production:
+`BumpCurrentEpoch` advances the epoch with `Interlocked.Increment`
+(`LightEpoch.cs:368`), and .NET's `Interlocked` operations are specified as
+fully sequentially consistent, so they compile to the `AL` form. The relaxed
+cell is a what-if that exists to prove the encoding has teeth, not a reachable
+production state.
 
 ### Open questions
 
 These are recorded because they are not yet closed, not because they are
 expected to fail:
 
-* The non-LSE codegen path has been exercised on hardware, but that batch had no
-  live sensitivity control, so under the rule below it currently proves nothing.
-  (The non-LSE path *is* covered formally, by the composed litmus above.)
+* The non-LSE codegen path (`DOTNET_EnableArm64Atomics=0`) is now **half
+  covered**. In shared-epoch mode the batch carried a live control and it fired:
+  `baseline` crashed 4/4 (at 110.2 s, 57.7 s, 2.8 s, 20.1 s) while the fix
+  survived 4/4, with 8/8 slot reuse — so on that path the fix is doing real
+  work. In `resume-and-refresh` mode the control did **not** fire (`plain` 0/8,
+  fix 0/8), which under the rule below means those eight survivals prove
+  nothing: with LSE disabled the whole runtime's atomics change, and the
+  `ldaxr`/`stlxr`/`dmb ish` sequence is plausibly slow enough to close the race
+  window for every arm. Reported as *no coverage in that mode* rather than as a
+  pass. (The non-LSE path is covered formally in both modes, by the composed
+  litmus above.)
 * **Whether the fix is exposed to the lost wakeup on ARM64.** This is now only
   half open. On **x86 it is settled and the answer is yes**: the fix publishes
   with `Volatile.Write` and then probes `waiterCount`, which is exactly the
