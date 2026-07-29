@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 // Hardware litmus for the LightEpoch lost-wakeup pair (U2), run on x86-64.
@@ -33,7 +34,7 @@ internal static class Program
     private static void Main(string[] args)
     {
         long trials = args.Length > 0 ? long.Parse(args[0]) : 2_000_000;
-        Console.WriteLine("x86-64 hardware litmus: LightEpoch lost wakeup (U2)");
+        Console.WriteLine($"hardware litmus: LightEpoch lost wakeup (U2)  [{RuntimeInformation.ProcessArchitecture}]");
         Console.WriteLine($"cores={Environment.ProcessorCount}  trials={trials:N0} per arm");
         Console.WriteLine();
         Console.WriteLine($"{"arm",-9} {"how the releaser publishes",-40} {"lost wakeups",13} {"rate",11}");

@@ -270,10 +270,31 @@ core assignments.
 ## Choosing the fix: the hazard is load-side
 
 The obvious fix is a full `StoreLoad` barrier after the announce, and it works.
-But it costs **+56%** on the hot path, and it fails a basic sanity check: *the
-buggy code is safe on x86*. If the hazard were really a store-buffer /
-`StoreLoad` problem, x86 would fault too — x86 permits `StoreLoad` reordering.
-It does not fault. So the store-side diagnosis cannot be the whole story.
+But it costs **+56%** on the hot path, and it over-fixes: it treats the whole
+defect as a store-buffer problem when only part of it is.
+
+Separating the two parts needs a control, not an argument. The unfixed baseline
+faults on **both** architectures, so "which architecture faults" does not
+discriminate. What discriminates is holding the *acquire* announce fixed — the
+slot-claiming CAS, a locked RMW that drains the store buffer — and varying only
+the **refresh** announce, the `E → E'` update that `ProtectAndDrain` performs.
+Run in the pattern that actually executes that path
+(`--pattern resume-and-refresh`; under `--pattern bare` the refresh announce is
+never reached and the comparison is vacuous):
+
+| refresh announce | x86-64 (i7-12700K, quarantine) | ARM64 (Neoverse N2, unmap) |
+|---|---|---|
+| *baseline, no CAS* — control | **51,027 violations**, 4/4 reps | **16 / 20 crashed** |
+| CAS + plain refresh | **0** / 19,350,322 sampled | **13 / 20 crashed** |
+| CAS + release refresh | **0** / 14,407,048 sampled | crashed |
+| CAS + acquire load | **0** / 16,507,906 sampled | **0 / 20** |
+
+This is a genuine architecture dissociation, and it is what actually selects the
+fix. Once the CAS is in place, x86 cannot be made to fault however the refresh
+announce is ordered — across 19.3 million detector opportunities with a live
+control firing in every replicate — while ARM64 still crashes 13 times in 20.
+So the CAS closes the store side, and what it leaves behind is a *load*-side
+hazard that is invisible on x86.
 
 Reading the two sides together shows why:
 
@@ -292,9 +313,10 @@ Announcing `E+1` while your own view is still at `E` means vouching for an epoch
 you have not caught up to — which raises `SafeToReclaimEpoch` and authorises the
 reclaimer to free the very object you are about to read.
 
-That diagnosis explains the architecture split exactly: **x86 gives every load
-acquire semantics**, so the plain announce is already safe there; AArch64 does
-not. The fix is therefore an **acquire load**, not a barrier:
+That diagnosis explains the dissociation exactly: **x86 gives every load
+acquire semantics**, so the reader's `load→load` edge is free there and only the
+store side ever needed repair; AArch64 gives no such guarantee. The fix is
+therefore an **acquire load**, not a barrier:
 
 ```csharp
 (*(tableAligned + entry)).localCurrentEpoch = Volatile.Read(ref CurrentEpoch);
@@ -529,17 +551,14 @@ expected to fail:
   window for every arm. Reported as *no coverage in that mode* rather than as a
   pass. (The non-LSE path is covered formally in both modes, by the composed
   litmus above.)
-* **Whether the fix is exposed to the lost wakeup on ARM64.** This is now only
-  half open. On **x86 it is settled and the answer is yes**: the fix publishes
-  with `Volatile.Write` and then probes `waiterCount`, which is exactly the
-  `volatile` arm of the hardware litmus below — measured at tens of thousands of
-  lost wakeups per million trials. On ARM64 it escapes only if the probe emits
-  `ldar` rather than `ldapr` (`STLR;LDAR` is forbidden, `STLR;LDAPR` is allowed),
-  and the disassembly table above shows this JIT emitting `ldapr` for
-  `Volatile.Read`, which points the same way. That is deliberately **not** being
-  inferred — it is the same one-half-of-the-pair mistake documented below — and a
-  disassembly of `Release()` is pending. It does not affect the recommended
-  repair, which is correct on every target either way.
+* **Whether the fix is exposed to the lost wakeup on ARM64.** **Closed — yes.**
+  It was half open for a while, settled on x86 and turning on `ldar` vs `ldapr`
+  on ARM64. Rather than settle it from disassembly, the litmus was run on the
+  Neoverse N2 directly: the `volatile` arm, which is exactly what the fix's
+  `Release()` does, reproduces the lost wakeup on **both** architectures, at up
+  to 48% of trials on ARM64 against two controls sitting at zero. See
+  [the numbers below](#the-lost-wakeup-and-two-wrong-answers-on-the-way-to-it).
+  It does not affect the recommended repair, which is correct on every target.
 
 `WeakMemory.tla` cannot decide the RCsc/RCpc question either way — its acquire
 abstraction does not distinguish the two, and says so in a comment at
@@ -577,6 +596,22 @@ finite run — on the **fixed** arm, `rounds=7,864,320 freedPages=7,864,321
 slot reuse: 8/8` in shared-epoch mode, and `rounds=1,638,400
 freedPages=1,638,401` in `resume-and-refresh`. A build reclaiming several million
 pages while surviving is not surviving by failing to reclaim.
+
+The same trap caught the x86 side of the load-side comparison, and is worth
+recording because it was self-inflicted *after* all of the above had been
+written. Comparing `LE_REFRESH_ORDER` arms on x86 gave a clean null — zero
+violations on every fixed arm, with the baseline control firing. It was
+worthless. The runs used `--pattern bare`, which performs `Resume()` → access →
+`Suspend()` and never calls `InternalRefresh()`/`ProtectAndDrain()` at all, so
+the knob selected between branches that were never reached and every arm was
+literally the same program. The control fired because the *baseline* differs
+from `casannounce` in the acquire announce, which `bare` does exercise — so the
+batch looked fully powered while being blind to the one variable under test.
+Re-run under `--pattern resume-and-refresh`, which does execute the refresh
+announce, the comparison became meaningful. **A live control proves the harness
+can detect *something*; it does not prove the harness can detect the thing you
+are varying.** When a knob shows no effect, confirm the code it controls
+actually executed before believing the null.
 
 The one defect that ran the other way — manufacturing a **false alarm** rather
 than a false negative — was in the PowerShell driver, and it briefly appeared to
@@ -1401,17 +1436,36 @@ plain store.
 That row also settles a question about *this repository's own fix*. The fixed
 implementation's `Release()` publishes with `Volatile.Write` and then probes
 `waiterCount`, which is precisely the `volatile` arm. So the fix inherits the
-lost wakeup on x86 too. It is not a defect introduced by the fix — production has
-it as well, and worse, since production is exposed on ARM64 unconditionally while
-the fix is only exposed there under the RCpc reading — but it does mean the
-announce repair and this repair are independent, and shipping one does not
-address the other.
+lost wakeup too. It is not a defect introduced by the fix — production has it as
+well, and worse — but it does mean the announce repair and this repair are
+independent, and shipping one does not address the other.
+
+That was left as a half-open question for a while: settled on x86, and on ARM64
+turning on whether the probe emits `ldar` or `ldapr`. Rather than resolve it by
+reading disassembly, the same litmus was built and run on the Neoverse N2, which
+answers the question the codegen was only a proxy for. Same four arms, 1,000,000
+trials each, two cycles:
+
+| arm | how the releaser publishes | lost wakeups | rate |
+|---|---|---:|---:|
+| `plain` | `slot = 0` — **production** | 206,815 / 108,513 | **~11–21%** |
+| `volatile` | `Volatile.Write(ref slot, 0)` — **the fix** | 482,696 / 82,554 | **~8–48%** |
+| `barrier` | `slot = 0; Thread.MemoryBarrier()` — control | **0 / 0** | 0 |
+| `exchange` | `Interlocked.Exchange(ref slot, 0)` — control | **0 / 0** | 0 |
+
+Both controls sit at exactly zero on ARM64 as they do on x86, so the harness is
+sound on both targets. The hazard is roughly **an order of magnitude more
+frequent on ARM64** than the ~2% seen on x86, and — the point of the exercise —
+the `volatile` arm is exposed there too, at up to 48% of trials. The fix is
+therefore exposed to the lost wakeup on **both** architectures, measured on
+both, with no inference from codegen required. The `ldar`/`ldapr` question is
+moot: whichever the JIT picks, the behaviour is present.
 
 Priced on the same box, paired against a live control in the same batch:
 
 | Repair | Cost | Closes the hang? |
 |---|---:|---|
-| publish with `Volatile.Write` (release store) | **0** — byte-identical x86 codegen | **no** on x86; ARM64 only, and only if the probe is `ldar` |
+| publish with `Volatile.Write` (release store) | **0** — byte-identical x86 codegen | **no** — measured exposed on x86 *and* ARM64 |
 | publish with `Interlocked.Exchange` (`swpal`) | **+6.5 ns / +75%** | yes, everywhere — but far too expensive |
 | `Thread.MemoryBarrier()` between publish and probe | +4.2 ns / +48% | yes, everywhere — still on the hot path |
 | bound the sleep: `waiterSemaphore.Wait(timeout, …)` | **0** — slow path only | yes, everywhere |
