@@ -283,10 +283,36 @@ not. The fix is therefore an **acquire load**, not a barrier:
 
 | Refresh announce | TLA+ (`armlb`) | herd7 (official `aarch64.cat`) | ARM64 hardware | x86 cost |
 |---|---|---|---|---|
-| plain store | **VIOLATED** (255 states) | **ALLOWED** | **faulted 6/10** | — |
-| release store | **VIOLATED** (175 states) | **ALLOWED** | faulted | — |
-| plain + `DMB ISH` | HOLDS (155 states) | FORBIDDEN (0/5) | see note | **+49%** |
-| **acquire load** | **HOLDS** (235 states) | **FORBIDDEN** | **survived 10/10** | **+0.4%** |
+| plain store | **VIOLATED** (255 states) | **ALLOWED** | **crashed 13/20** | — |
+| release store | **VIOLATED** (175 states) | **ALLOWED** | crashed | — |
+| plain + `DMB ISH` | HOLDS (155 states) | FORBIDDEN (0/5) | crashed 0/20 | **+49%** |
+| **acquire load** | **HOLDS** (235 states) | **FORBIDDEN** | **crashed 0/20** | **+0.4%** |
+
+Hardware column comes from the powered matrix below.
+
+### The powered hardware matrix
+
+`resume-and-refresh --pairs 8`, 180 s cap, **20 runs per arm**, interleaved
+across two Neoverse-N2 VMs so that no single arm can be biased by a slow VM or a
+noisy-neighbour period:
+
+| Arm | Crashed | Fastest crash |
+|---|---:|---|
+| `baseline` (unfixed) — **control** | **16 / 20** | 2.1 s |
+| `casannounce` + `LE_REFRESH_ORDER=plain` | **13 / 20** | 1.7 s |
+| `casannounce` + `LE_REFRESH_ORDER=fence` | 0 / 20 | — |
+| `casannounce` + acquire load (default) | 0 / 20 | — |
+| `fullbarrier` | 0 / 20 | — |
+
+Fisher exact, plain (13/20) against the acquire load (0/20): **p = 1.3e-5**.
+Against the baseline control: **p = 1.5e-7**. Every crash landed in
+`Litmus<…>.ReaderLoop()`, i.e. the reader dereferencing a page the reclaimer had
+already unmapped — the use-after-free itself, not an unrelated fault.
+
+This matrix supersedes an earlier 10-run batch in which `fence` appeared to
+crash 6/10 while the weaker acquire load survived — an impossible ordering that
+turned out to be a stale binary predating a redeploy. It also supersedes every
+3-run verdict in this study.
 
 A release store fails because it orders the *wrong side*: it publishes the slot
 but does nothing to order the reader's later loads.
@@ -306,6 +332,14 @@ slot-claiming CAS, while leaving the refresh announce plain, still faults:
 | `fence` | `plain` | **crashed 2/3** |
 | `cas` | acquire load | survived 3/3 |
 | `fence` | acquire load | survived 3/3 |
+
+Only 3 runs per cell, which on its own is far too few — an arm that crashes
+around half the time survives 3/3 by chance about one time in eight. This table
+is reported for the *positive* rows only: the two `plain` cells crashing is
+consistent with the 20-run `plain` rate of 13/20, and the point being made is
+that adding a fence to the claim CAS does **not** rescue a plain refresh. The
+two survival rows carry no weight here; the acquire load's 0/20 in the powered
+matrix above is what supports it.
 
 Adding a full `DMB ISH` after the claim CAS changes nothing while the refresh
 announce stays plain, and adds nothing once it is fixed. On this path the
