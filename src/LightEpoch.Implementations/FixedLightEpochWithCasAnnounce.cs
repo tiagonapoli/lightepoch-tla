@@ -187,6 +187,99 @@ namespace LightEpoch.Core
         }
 
         /// <summary>
+        /// Ordering of the slot-free publish in <see cref="Release"/>:
+        /// 0 = release store (<c>Volatile.Write</c>, emits <c>stlr</c>), 1 = full-fence RMW
+        /// (<c>Interlocked.Exchange</c>, emits <c>swpal</c>).
+        /// <para>
+        /// This selects between the two candidate fixes for the lost-wakeup store-buffering pair
+        /// between <see cref="Release"/> and <see cref="ReserveEntryWait"/>. <see cref="Release"/>
+        /// publishes the slot as free and then probes <c>waiterCount</c> to decide whether to
+        /// signal the semaphore; a waiter registers with <c>Interlocked.Increment</c> and re-probes
+        /// the slot before sleeping. If both loads return stale values the waiter sleeps forever
+        /// on a slot that is free.
+        /// </para>
+        /// <para>
+        /// Mode 0 relies on AArch64 release/acquire being RCsc, so that the <c>stlr</c> here and the
+        /// <c>ldar</c> for the <c>waiterCount</c> probe supply StoreLoad ordering as a pair. That
+        /// holds only if the JIT emits <c>ldar</c> rather than the RCpc <c>ldapr</c>. Mode 1 does not
+        /// depend on that choice: a full-fence RMW forbids the hang under every reading, at the cost
+        /// of a locked operation on the per-operation release path. This knob exists to price that.
+        /// </para>
+        /// <para>
+        /// Mode 2 (<c>plain</c>) reproduces the production spelling — an ordinary store — and exists
+        /// purely as the measurement baseline that modes 0 and 1 are priced against.
+        /// </para>
+        /// </summary>
+        static readonly string[] ReleaseOrderNames = ["volatile", "exchange", "plain"];
+
+        internal static readonly int TestReleaseOrder = ParseReleaseOrder(Environment.GetEnvironmentVariable("LE_RELEASE_ORDER"));
+
+        /// <summary>
+        /// Resolved name of <see cref="TestReleaseOrder"/>, for the harness banner.
+        /// </summary>
+        public static string ReleaseOrderName => ReleaseOrderNames[TestReleaseOrder] + (Environment.GetEnvironmentVariable("LE_RELEASE_ORDER") is null ? " (default)" : string.Empty);
+
+        static int ParseReleaseOrder(string value)
+        {
+            if (value is null)
+                return 0;
+
+            int index = Array.IndexOf(ReleaseOrderNames, value);
+            if (index < 0)
+                throw new ArgumentException($"LE_RELEASE_ORDER='{value}' is not recognised; expected one of {string.Join(", ", ReleaseOrderNames)}");
+
+            return index;
+        }
+
+        /// <summary>
+        /// Ordering of the drain-list publish store (the <c>epoch</c> field that makes a slot's
+        /// <c>action</c> visible to a concurrent <see cref="Drain"/>):
+        /// 0 = release store (<c>Volatile.Write</c>), 1 = ordinary store (the production spelling).
+        /// <para>
+        /// Production writes <c>action</c> then <c>epoch</c> with two ordinary stores, so a concurrent
+        /// <see cref="Drain"/> — which scans every slot and is not gated on <c>drainCount</c> — may
+        /// observe the new epoch without the matching action and invoke <c>null</c> or the stale
+        /// previous delegate. The trailing <c>Interlocked</c> on two of the three sites does not help:
+        /// it constrains both stores jointly against later accesses and says nothing about their
+        /// order relative to each other, and the reclaim-and-replace branch has no interlocked
+        /// operation after the stores at all.
+        /// </para>
+        /// <para>
+        /// All three sites fire at hybrid-log page or checkpoint granularity, so this knob is
+        /// expected to be unmeasurable on the per-operation benchmark. It exists to demonstrate that.
+        /// </para>
+        /// </summary>
+        static readonly string[] DrainPublishOrderNames = ["volatile", "plain"];
+
+        internal static readonly int TestDrainPublishOrder = ParseDrainPublishOrder(Environment.GetEnvironmentVariable("LE_DRAIN_PUBLISH_ORDER"));
+
+        /// <summary>
+        /// Resolved name of <see cref="TestDrainPublishOrder"/>, for the harness banner.
+        /// </summary>
+        public static string DrainPublishOrderName => DrainPublishOrderNames[TestDrainPublishOrder] + (Environment.GetEnvironmentVariable("LE_DRAIN_PUBLISH_ORDER") is null ? " (default)" : string.Empty);
+
+        static int ParseDrainPublishOrder(string value)
+        {
+            if (value is null)
+                return 0;
+
+            int index = Array.IndexOf(DrainPublishOrderNames, value);
+            if (index < 0)
+                throw new ArgumentException($"LE_DRAIN_PUBLISH_ORDER='{value}' is not recognised; expected one of {string.Join(", ", DrainPublishOrderNames)}");
+
+            return index;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static void PublishDrainEpoch(ref long slot, long value)
+        {
+            if (TestDrainPublishOrder == 0)
+                Volatile.Write(ref slot, value);
+            else
+                slot = value;
+        }
+
+        /// <summary>
         /// Test-only. When non-zero, every thread's home offsets are hashed into just this
         /// many slots instead of the whole table, so distinct threads repeatedly claim the
         /// slot another thread just released. Production hashing spreads threads over 128
@@ -532,7 +625,7 @@ namespace LightEpoch.Core
                     if (Interlocked.CompareExchange(ref drainList[i].epoch, long.MaxValue - 1, long.MaxValue) == long.MaxValue)
                     {
                         drainList[i].action = onDrain;
-                        Volatile.Write(ref drainList[i].epoch, PriorEpoch);
+                        PublishDrainEpoch(ref drainList[i].epoch, PriorEpoch);
                         _ = Interlocked.Increment(ref drainCount);
                         break;
                     }
@@ -548,7 +641,7 @@ namespace LightEpoch.Core
                         {
                             var triggerAction = drainList[i].action;
                             drainList[i].action = onDrain;
-                            Volatile.Write(ref drainList[i].epoch, PriorEpoch);
+                            PublishDrainEpoch(ref drainList[i].epoch, PriorEpoch);
                             triggerAction();
                             break;
                         }
@@ -652,7 +745,7 @@ namespace LightEpoch.Core
                         // Store off the trigger action, then set epoch to int.MaxValue to mark this slot as "available for use".
                         var trigger_action = drainList[i].action;
                         drainList[i].action = null;
-                        Volatile.Write(ref drainList[i].epoch, long.MaxValue);
+                        PublishDrainEpoch(ref drainList[i].epoch, long.MaxValue);
                         _ = Interlocked.Decrement(ref drainCount);
 
                         // Execute the action
@@ -712,7 +805,12 @@ namespace LightEpoch.Core
             // slot as free. It must be a release store: if it were reordered ahead of the
             // threadId clear above, another thread could win the claim CAS and write its own
             // threadId, only for this thread's clear to land afterwards and wipe it.
-            Volatile.Write(ref (*(tableAligned + entry)).localCurrentEpoch, 0);
+            if (TestReleaseOrder == 0)
+                Volatile.Write(ref (*(tableAligned + entry)).localCurrentEpoch, 0);
+            else if (TestReleaseOrder == 1)
+                _ = Interlocked.Exchange(ref (*(tableAligned + entry)).localCurrentEpoch, 0);
+            else
+                (*(tableAligned + entry)).localCurrentEpoch = 0;
 
             entry = kInvalidIndex;
             if (waiterCount > 0)

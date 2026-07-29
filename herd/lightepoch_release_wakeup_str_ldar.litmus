@@ -1,0 +1,45 @@
+AArch64 LightEpoch-release-wakeup-str-ldar
+(*
+ * U2 as it exists in PRODUCTION LightEpoch (Tsavorite LightEpoch.cs:552-555, and
+ * the identical Garnet.client copy), as opposed to the CAS-announce fix.
+ *
+ * The difference is P0's first instruction. Production clears the slot-ownership
+ * word with a PLAIN store:
+ *
+ *     (*(tableAligned + entry)).threadId = 0;   // :552  ordinary store  -> STR
+ *     if (waiterCount > 0)                      // :555  volatile read   -> LDAR
+ *         waiterSemaphore.Release();
+ *
+ * The fix instead uses Volatile.Write, giving STLR;LDAR, which is FORBIDDEN
+ * because AArch64 release/acquire are RCsc and the STLR -> LDAR edge supplies
+ * StoreLoad ordering as a pair.
+ *
+ * That edge requires an actual STLR. LDAR orders only accesses that follow it;
+ * it places no constraint on an earlier ORDINARY store. So replacing STLR with
+ * STR should remove the ordering and re-admit the hang, EVEN THOUGH the load is
+ * the stronger RCsc LDAR.
+ *
+ * If this is Allowed, then U2 on production is unconditional and does NOT depend
+ * on the unresolved ldar-vs-ldapr codegen question -- that question only decides
+ * whether the FIXED implementation is also exposed.
+ *
+ * P1 is unchanged: a waiter registering with Interlocked.Increment (LDADDAL) and
+ * re-probing the slot with the claim CAS before sleeping.
+ *
+ * Hang = both stale reads at once: P0 sees waiterCount == 0 so never signals,
+ * and P1's CAS reads the stale occupied value so it sleeps on a free slot.
+ *)
+{
+threadId=1;
+waiterCount=0;
+0:X0=threadId; 0:X1=waiterCount;
+1:X0=waiterCount; 1:X1=threadId;
+}
+ P0                 | P1                 ;
+ MOV W4,#0          | MOV W4,#1          ;
+ STR W4,[X0]        | LDADDAL W4,W5,[X0] ;
+ LDAR W5,[X1]       | MOV W6,#0          ;
+                    | MOV W7,#2          ;
+                    | CASAL W6,W7,[X1]   ;
+
+exists (0:X5=0 /\ 1:X6=1)

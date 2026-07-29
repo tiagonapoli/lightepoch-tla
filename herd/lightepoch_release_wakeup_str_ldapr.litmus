@@ -1,0 +1,21 @@
+AArch64 LightEpoch-release-wakeup-str-ldapr
+(*
+ * Production shape (plain store) combined with the RCpc load. Strictly weaker
+ * than lightepoch_release_wakeup_str_ldar on both axes, so it must be Allowed
+ * if that one is. Included so the production verdict does not rest on a single
+ * codegen assumption about the volatile read of waiterCount.
+ *)
+{
+threadId=1;
+waiterCount=0;
+0:X0=threadId; 0:X1=waiterCount;
+1:X0=waiterCount; 1:X1=threadId;
+}
+ P0                 | P1                 ;
+ MOV W4,#0          | MOV W4,#1          ;
+ STR W4,[X0]        | LDADDAL W4,W5,[X0] ;
+ LDAPR W5,[X1]      | MOV W6,#0          ;
+                    | MOV W7,#2          ;
+                    | CASAL W6,W7,[X1]   ;
+
+exists (0:X5=0 /\ 1:X6=1)

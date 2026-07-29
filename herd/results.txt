@@ -952,3 +952,32 @@ waiterCount. Neoverse N2 implements FEAT_LRCPC, so the JIT is permitted to choos
 ldapr. Pending disassembly on ARM64 hardware. Note that at the .NET memory model
 level the concern stands regardless, since the spec promises only acquire and
 does not promise RCsc.
+
+================================================================================
+CORRECTION: the production Release() shape (STR, not STLR)
+================================================================================
+The earlier section concluded that the lost wakeup in Release() hinges on JIT
+codegen (ldar vs ldapr). That conclusion assumed the releaser's publishing store
+is an STLR. In PRODUCTION LightEpoch it is not: Release() clears both words with
+ordinary stores (LightEpoch.cs:551-552) and only then does the volatile read of
+waiterCount (:555). The shape is STR;LDAR, and LDAR constrains only accesses
+that FOLLOW it -- it places no ordering constraint on an earlier plain store.
+
+herd7 7.58 vs ARM's official aarch64.cat:
+
+  lightepoch_release_wakeup_str_ldar          Allowed   Positive: 3 Negative: 7
+  lightepoch_release_wakeup_str_ldapr         Allowed   Positive: 3 Negative: 7
+  lightepoch_release_wakeup_stlr_ldar_casal   No        Positive: 0 Negative: 7
+
+Rows 1 and 3 differ in exactly one instruction on P0 (STR vs STLR); P1 is
+byte-identical (LDADDAL + CASAL, what .NET actually emits for
+Interlocked.Increment and Interlocked.CompareExchange). Store strength is
+therefore isolated as the single variable.
+
+VERDICT: in production the lost wakeup is real and UNCONDITIONAL on AArch64,
+independent of the ldar/ldapr question. That question only decided whether the
+FIXED implementation is also exposed -- and because the fix publishes with
+Volatile.Write (STLR), it is not.
+
+Liveness only; no memory-safety consequence. Unreachable until the epoch table
+is full (needs more concurrently protected threads than max(128, 2*nproc)).

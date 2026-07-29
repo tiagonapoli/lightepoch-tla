@@ -1,0 +1,31 @@
+AArch64 LightEpoch-release-wakeup-stlr-ldar-casal
+(*
+ * CONTROL for the two production (STR) rows.
+ *
+ * Identical to lightepoch_release_wakeup_str_ldar in every respect except that
+ * P0's slot-clearing store is a release store (STLR) rather than a plain store
+ * (STR) -- i.e. this is the CAS-announce fix, not production.
+ *
+ * P1 is byte-identical to the production rows, using CASAL (what .NET's
+ * Interlocked.CompareExchange actually emits) rather than the relaxed CAS used
+ * in the original wakeup litmus set.
+ *
+ * This row MUST come out Never. If it did not, the Allowed verdict on the STR
+ * rows would prove nothing: it would mean the P1 encoding, not P0's store
+ * strength, was carrying the result. Together with str_ldar coming out Allowed,
+ * a Never here isolates the plain-vs-release store on P0 as the single variable.
+ *)
+{
+threadId=1;
+waiterCount=0;
+0:X0=threadId; 0:X1=waiterCount;
+1:X0=waiterCount; 1:X1=threadId;
+}
+ P0                 | P1                 ;
+ MOV W4,#0          | MOV W4,#1          ;
+ STLR W4,[X0]       | LDADDAL W4,W5,[X0] ;
+ LDAR W5,[X1]       | MOV W6,#0          ;
+                    | MOV W7,#2          ;
+                    | CASAL W6,W7,[X1]   ;
+
+exists (0:X5=0 /\ 1:X6=1)

@@ -51,7 +51,7 @@ The bug is demonstrated in two complementary ways:
   * [A verdict that turned out to be a theorem](#a-verdict-that-turned-out-to-be-a-theorem)
   * [The one thing blocking removal](#the-one-thing-blocking-removal)
 * [Other ordering defects in the same class](#other-ordering-defects-in-the-same-class)
-  * [The lost wakeup that turned on one instruction](#the-lost-wakeup-that-turned-on-one-instruction)
+  * [The lost wakeup, and two wrong answers on the way to it](#the-lost-wakeup-and-two-wrong-answers-on-the-way-to-it)
 
 ---
 
@@ -1180,7 +1180,7 @@ payload and then the field that publishes it:
 ```csharp
 drainList[i].action = onDrain;              // plain store — the payload
 drainList[i].epoch  = PriorEpoch;           // plain store — the publish
-_ = Interlocked.Increment(ref drainCount);  // fence, but after both — orders nothing
+_ = Interlocked.Increment(ref drainCount);  // a fence, but after both stores
 ```
 
 This is message passing with no release on the writer side, so the publishing
@@ -1207,11 +1207,11 @@ both architectures — the .NET memory model explicitly permits reordering ordin
 accesses, so the once-common belief that plain stores carry release semantics on
 the CLR gives no protection.
 
-### The lost wakeup that turned on one instruction
+### The lost wakeup, and two wrong answers on the way to it
 
-The third finding is the interesting one, because the first analysis of it was
-wrong in an instructive way. `Release()` and `ReserveEntryWait()` form an `SB`
-pair:
+The third finding is the interesting one, because it was analysed wrongly twice —
+first too strongly, then too weakly — and the litmus tests are what settled it.
+`Release()` and `ReserveEntryWait()` form an `SB` pair:
 
 | Releaser (`Release`) | Waiter (`ReserveEntryWait`) |
 |---|---|
@@ -1219,40 +1219,56 @@ pair:
 | load `waiterCount`; if `> 0`, signal | re-probe the slot; if still taken, sleep |
 
 If the releaser reads a stale `0` while the waiter reads a stale non-zero, nobody
-signals and the waiter sleeps forever on a slot that is free. The natural
-argument is that this is unconditional: a volatile read is only an acquire load,
-and acquire does not close store buffering — the same argument this document uses
-to reject the release-store candidate for the announce.
+signals and the waiter sleeps forever on a slot that is free.
 
-That argument is right about the .NET memory model and **wrong about the code
-AArch64 actually emits**, because AArch64 acquire/release are RCsc: an `LDAR` may
-not be reordered before an earlier `STLR`, so the pair supplies StoreLoad ordering
-by itself. `LDAPR` is RCpc and drops exactly that edge. Under ARM's official
-`aarch64.cat`:
+**The first answer** was that this is unconditional, because a volatile read is
+only an acquire load and acquire does not close store buffering — the same
+argument this document uses to reject the release-store candidate for the
+announce. That is right about the .NET memory model and wrong about AArch64,
+whose acquire/release are **RCsc**: an `LDAR` may not be reordered before an
+earlier `STLR`, so the pair supplies StoreLoad ordering by itself. `LDAPR` is
+RCpc and drops exactly that edge.
 
-| Releaser | Waiter's RMW | Verdict |
-|---|---|---|
-| `STLR ; LDAR` | `LDADDAL` | **Never 0 7** — forbidden |
-| `STLR ; LDAPR` | `LDADDAL` | **Sometimes 3 7** — the hang is real |
-| `SWPAL ; LDAR` | `LDADDAL` | Never 0 7 |
-| `STLR ; DMB ISH ; LDAR` | `LDADDAL` | Never 0 7 |
-| `STLR ; LDAR` — **control** | `LDADD` (relaxed) | **Sometimes 3 7** |
+**The second answer** — mine — was that the hang therefore hinges on JIT codegen,
+on whether a `volatile int` read becomes `ldar` or `ldapr` on a core implementing
+`FEAT_LRCPC`. That is true of *the fixed implementation*, and it quietly assumed
+the releaser's publishing store is an `STLR`. In production it is not.
+`Release()` clears both words with **ordinary stores** (`:551-552`) and only then
+does the volatile read of `waiterCount` (`:555`). The shape is `STR ; LDAR`, and
+an `LDAR` constrains only what follows it — it places no ordering constraint on an
+earlier plain store. Under ARM's official `aarch64.cat`:
 
-The last row is the sensitivity control, and it is what makes the three
-forbidden verdicts worth anything: weakening the waiter's RMW does produce the
-hang, so the litmus can express the outcome.
+| Releaser's store | Waiter's load | Waiter's RMW | Verdict |
+|---|---|---|---|
+| **`STR`** (production) | `LDAR` | `LDADDAL`+`CASAL` | **Sometimes 3 7 — allowed** |
+| **`STR`** (production) | `LDAPR` | `LDADDAL`+`CASAL` | **Sometimes 3 7 — allowed** |
+| `STLR` (the fix) | `LDAR` | `LDADDAL`+`CASAL` | **Never 0 7** — forbidden |
+| `STLR` | `LDAPR` | `LDADDAL` | Sometimes 3 7 |
+| `SWPAL` | `LDAR` | `LDADDAL` | Never 0 7 |
+| `STLR ; DMB ISH` | `LDAR` | `LDADDAL` | Never 0 7 |
+| `STLR` | `LDAR` | `LDADD` (relaxed) — **control** | Sometimes 3 7 |
 
-So whether this hang exists is not a question about the algorithm at all. It is a
-question about which instruction the JIT selects for one volatile read, on a core
-that implements `FEAT_LRCPC` and may legitimately choose either. Two lessons
-generalise. Reasoning at the memory-model level tells you what is *permitted*, and
-that is the right level for deciding what to fix — but it does not tell you what a
-given target *exhibits*, and conflating the two produces confident claims in both
-directions. And an acquire load is not one thing: RCsc and RCpc acquire differ
-precisely on the edge that store buffering depends on.
+Rows 1 and 3 differ in exactly one character of one instruction, `STR` versus
+`STLR`, with the waiter byte-identical, so store strength is isolated as the
+single variable. The last row is the sensitivity control: weakening the waiter's
+RMW does produce the hang, which is what makes the `Never` verdicts worth
+anything.
 
-Graded honestly, this one is liveness only, with no memory-safety consequence, and
-it is unreachable until the epoch table is full — which needs more concurrently
+So the conclusion is the opposite of the one I published a few hours earlier.
+**In production the lost wakeup is real and unconditional on AArch64**, and does
+not depend on the unresolved `ldar`/`ldapr` codegen question at all. That question
+only ever decided whether the *fixed* implementation is also exposed — and because
+the fix publishes with `Volatile.Write`, it is not.
+
+Two lessons generalise, and the second is the one that caught me. Reasoning at the
+memory-model level tells you what is *permitted*, which is the right level for
+deciding what to fix, but not what a given target *exhibits*; conflating them
+produces confident claims in both directions. And when a pairwise ordering
+argument saves you, check that **both** halves of the pair are what you assumed
+— I had verified the load and inferred the store.
+
+Graded honestly, this is liveness only, with no memory-safety consequence, and it
+is unreachable until the epoch table is full, which needs more concurrently
 protected threads than `max(128, 2 × ProcessorCount)`. Garnet does not do that
 today. The unstated assumption keeping it safe is "the table is never full", and
 that assumption is written down nowhere.

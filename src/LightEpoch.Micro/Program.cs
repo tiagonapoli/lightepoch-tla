@@ -143,6 +143,10 @@ namespace LightEpoch.Micro
 
             Console.WriteLine($"contended epoch throughput  threads={threads}  seconds={seconds}  " +
                               $"cores={Environment.ProcessorCount}");
+            Console.WriteLine($"cas-announce knobs: acquire={FixedLightEpochWithCasAnnounce.AcquireOrderName}  " +
+                              $"refresh={FixedLightEpochWithCasAnnounce.RefreshOrderName}  " +
+                              $"release={FixedLightEpochWithCasAnnounce.ReleaseOrderName}  " +
+                              $"drain-publish={FixedLightEpochWithCasAnnounce.DrainPublishOrderName}");
             Console.WriteLine();
             Console.WriteLine($"{"impl",-46} {"Mops/s",12} {"ns/op",10}");
 
