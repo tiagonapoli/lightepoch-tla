@@ -261,7 +261,7 @@ core assignments.
 ## Choosing the fix: the hazard is load-side
 
 The obvious fix is a full `StoreLoad` barrier after the announce, and it works.
-But it costs **+49%** on the hot path, and it fails a basic sanity check: *the
+But it costs **+56%** on the hot path, and it fails a basic sanity check: *the
 buggy code is safe on x86*. If the hazard were really a store-buffer /
 `StoreLoad` problem, x86 would fault too — x86 permits `StoreLoad` reordering.
 It does not fault. So the store-side diagnosis cannot be the whole story.
@@ -297,8 +297,27 @@ not. The fix is therefore an **acquire load**, not a barrier:
 |---|---|---|---|---|---|
 | plain store | **VIOLATED** (255 states) | **ALLOWED** | **13 / 20** | **2,475 – 435,814** | — |
 | release store | **VIOLATED** (175 states) | **ALLOWED** | crashed | **235,051 – 848,621** | — |
-| plain + `DMB ISH` | HOLDS (155 states) | FORBIDDEN (0/5) | 0 / 20 | not measured | **+49%** |
-| **acquire load** | **HOLDS** (235 states) | **FORBIDDEN** | **0 / 20** | **0, 0, 0** | **+0.4%** |
+| plain + `DMB ISH` | HOLDS (155 states) | FORBIDDEN (0/5) | 0 / 20 | not measured | **+49% to +56%** |
+| **acquire load** | **HOLDS** (235 states) | **FORBIDDEN** | **0 / 20** | **0, 0, 0** | **~0%** |
+
+Cost column re-measured on the i7-12700K with the contended micro-benchmark
+(8 threads, 5 s), each mode run in its own batch alongside an unmodified baseline
+as a stability control. The baseline landed at 8.3 / 8.2 / 8.2 ns per operation
+across the three batches, so within-batch comparisons are sound:
+
+| Mode | Mops/s | ns/op | vs. baseline |
+|---|---:|---:|---:|
+| `baseline` (unfixed) | 974.55 | 8.2 | — |
+| `casannounce`, plain refresh | 980.24 | 8.2 | ~0% |
+| **`casannounce`, acquire load** | **971.12** | **8.2** | **~0%** |
+| `casannounce`, `DMB ISH` refresh | 627.20 | 12.8 | **+56%** |
+| `fullbarrier` implementation | 442.62 | 18.1 | **+120%** |
+
+The acquire load is indistinguishable from the *unfixed* baseline at this
+resolution — it replaces a plain load with `ldapr`, adding no barrier and no
+extra memory traffic. The `DMB ISH` variants are the ones that cost, which is
+the practical argument for diagnosing the hazard correctly rather than reaching
+for the strongest available barrier.
 
 Note the release store: it is *not* merely weaker than the fix, it violates at a
 rate comparable to the unfixed baseline. That is the predicted result — a release
