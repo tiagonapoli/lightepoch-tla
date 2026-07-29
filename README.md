@@ -1224,6 +1224,8 @@ state — the CAS is what makes the algorithm correct, and `threadId` should no
 longer be described as though it were.
 
 
+## Other ordering defects in the same class
+
 Auditing every ordering construct in the production class — rather than only the
 announce — turned up three more sites. They are recorded here because two of them
 are independent of the bug this document is about, and one of them is a
