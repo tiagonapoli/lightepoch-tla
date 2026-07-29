@@ -29,6 +29,11 @@ The bug is demonstrated in two complementary ways:
   * [ARM64 — hardware access violation (`0xC0000005`)](#arm64--hardware-access-violation-0xc0000005)
   * [x86-64 — logical use-after-free detection](#x86-64--logical-use-after-free-detection)
 * [Choosing the fix: the hazard is load-side](#choosing-the-fix-the-hazard-is-load-side)
+  * [What each candidate costs and whether it works](#what-each-candidate-costs-and-whether-it-works)
+  * [The powered hardware matrix](#the-powered-hardware-matrix)
+  * [What the hardware actually executes](#what-the-hardware-actually-executes)
+  * [Open questions](#open-questions)
+  * [A note on method](#a-note-on-method)
 * [Methodology](#methodology)
   * [The shared race (both architectures)](#the-shared-race-both-architectures)
   * [ARM64 method — detection by real memory unmapping](#arm64-method--detection-by-real-memory-unmapping)
@@ -175,6 +180,12 @@ fault.
 
 `fullbarrier` was run for a full 300 s on each machine under the exact configuration
 that faults the baseline there, and survived every time.
+
+These cells are single runs, so read them as *existence* results: they establish
+that the baseline faults and roughly how fast, not a rate. Survival rows here
+carry no statistical weight on their own — the
+[powered hardware matrix](#the-powered-hardware-matrix) further down is what
+supports the "survived" claims, with 20 runs per arm and a live control.
 
 Faulting stack, every time — the reader dereferencing a page the epoch already freed:
 
