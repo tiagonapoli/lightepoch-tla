@@ -1296,8 +1296,8 @@ the fix publishes with `Volatile.Write`, it is not, at least on the RCsc reading
 It is also not confined to ARM64. `SB` is precisely the reordering x86-TSO
 permits, and on x86 both the publish and the volatile probe are plain `mov`
 instructions, so nothing orders them. The litmus tests above are AArch64 because
-that is what `aarch64.cat` models, but the hazard itself is architecture-neutral,
-and that is what drives the choice of repair below.
+that is what `aarch64.cat` models, but the hazard itself is architecture-neutral
+— and it reproduces on x86 hardware at roughly 2% of trials, measured below.
 
 Two lessons generalise, and the second is the one that caught me. Reasoning at the
 memory-model level tells you what is *permitted*, which is the right level for
@@ -1332,12 +1332,35 @@ This one is not ARM-specific, which narrows the repair options considerably.
 pattern that makes the `Thread.MemoryBarrier()` in `SuspendDrain` necessary on
 x86 — and on x86-64 a release store is a plain `mov`. So spelling the publish
 `Volatile.Write` does nothing for this hazard on x86, and on ARM64 it helps only
-under the RCsc reading. Measured on the x86 box, paired against a live control in
-the same batch:
+under the RCsc reading.
+
+That is not left as an argument from the memory model.
+[`src/LightEpoch.SbLitmus`](src/LightEpoch.SbLitmus) runs the pair directly on
+hardware — two threads, a rendezvous per trial, and a grader that counts trials
+in which the releaser saw no waiter *and* the waiter saw the slot occupied. Both
+spellings under test are measured against two positive controls in the same run.
+On the x86-64 box (i7-12700K, 1,000,000 trials per arm, two interleaved cycles):
+
+| arm | how the releaser publishes | lost wakeups | rate |
+|---|---|---:|---:|
+| `plain` | `slot = 0` — **production** | 24,952 / 19,084 | ~2% |
+| `volatile` | `Volatile.Write(ref slot, 0)` | 46,927 / 15,184 | ~2–5% |
+| `barrier` | `slot = 0; Thread.MemoryBarrier()` — control | **0 / 0** | 0 |
+| `exchange` | `Interlocked.Exchange(ref slot, 0)` — control | **0 / 0** | 0 |
+
+So the lost wakeup is not a theoretical reading of a `.cat` file: it happens on
+ordinary x86 hardware in roughly one trial in fifty. The two controls sit at
+exactly zero across four million trials, which is what makes the other two rows
+mean something rather than being an artifact of the harness. And the `volatile`
+row is the load-bearing one — **the release-store repair does not close this
+hazard**, exactly as x86-TSO predicts, because there the release store *is* the
+plain store.
+
+Priced on the same box, paired against a live control in the same batch:
 
 | Repair | Cost | Closes the hang? |
 |---|---:|---|
-| publish with `Volatile.Write` (release store) | **0** — byte-identical x86 codegen | ARM64 only, and only if the probe is `ldar` |
+| publish with `Volatile.Write` (release store) | **0** — byte-identical x86 codegen | **no** on x86; ARM64 only, and only if the probe is `ldar` |
 | publish with `Interlocked.Exchange` (`swpal`) | **+6.5 ns / +75%** | yes, everywhere — but far too expensive |
 | `Thread.MemoryBarrier()` between publish and probe | +4.2 ns / +48% | yes, everywhere — still on the hot path |
 | bound the sleep: `waiterSemaphore.Wait(timeout, …)` | **0** — slow path only | yes, everywhere |
