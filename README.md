@@ -53,6 +53,8 @@ The bug is demonstrated in two complementary ways:
 * [Other ordering defects in the same class](#other-ordering-defects-in-the-same-class)
   * [The lost wakeup, and two wrong answers on the way to it](#the-lost-wakeup-and-two-wrong-answers-on-the-way-to-it)
   * [What the fix costs](#what-the-fix-costs)
+* [What to change in production](#what-to-change-in-production)
+  * [The one thing this study does not settle](#the-one-thing-this-study-does-not-settle)
 
 ---
 
@@ -494,17 +496,17 @@ expected to fail:
 * The non-LSE codegen path has been exercised on hardware, but that batch had no
   live sensitivity control, so under the rule below it currently proves nothing.
   (The non-LSE path *is* covered formally, by the composed litmus above.)
-* **Whether the fix is itself exposed to the lost wakeup** described later under
-  [Other ordering defects](#other-ordering-defects-in-the-same-class). Production
-  is unconditionally exposed, and the fix escapes only if the `waiterCount` probe
-  in `Release()` emits `ldar` rather than `ldapr` — `STLR;LDAR` is forbidden but
-  `STLR;LDAPR` is allowed. The table above shows this JIT emitting `ldapr` for
-  `Volatile.Read`, which suggests the probe is `ldapr` too and the fix therefore
-  does not escape either. This is deliberately **not** being inferred: it is the
-  same one-half-of-the-pair mistake documented below, and it is waiting on a
-  disassembly of `Release()` itself. Note that the recommended repair — bounding
-  the sleep — is correct either way, so this question affects the description of
-  the hazard rather than the choice of fix.
+* **Whether the fix is exposed to the lost wakeup on ARM64.** This is now only
+  half open. On **x86 it is settled and the answer is yes**: the fix publishes
+  with `Volatile.Write` and then probes `waiterCount`, which is exactly the
+  `volatile` arm of the hardware litmus below — measured at tens of thousands of
+  lost wakeups per million trials. On ARM64 it escapes only if the probe emits
+  `ldar` rather than `ldapr` (`STLR;LDAR` is forbidden, `STLR;LDAPR` is allowed),
+  and the disassembly table above shows this JIT emitting `ldapr` for
+  `Volatile.Read`, which points the same way. That is deliberately **not** being
+  inferred — it is the same one-half-of-the-pair mistake documented below — and a
+  disassembly of `Release()` is pending. It does not affect the recommended
+  repair, which is correct on every target either way.
 
 `WeakMemory.tla` cannot decide the RCsc/RCpc question either way — its acquire
 abstraction does not distinguish the two, and says so in a comment at
@@ -1356,6 +1358,15 @@ row is the load-bearing one — **the release-store repair does not close this
 hazard**, exactly as x86-TSO predicts, because there the release store *is* the
 plain store.
 
+That row also settles a question about *this repository's own fix*. The fixed
+implementation's `Release()` publishes with `Volatile.Write` and then probes
+`waiterCount`, which is precisely the `volatile` arm. So the fix inherits the
+lost wakeup on x86 too. It is not a defect introduced by the fix — production has
+it as well, and worse, since production is exposed on ARM64 unconditionally while
+the fix is only exposed there under the RCpc reading — but it does mean the
+announce repair and this repair are independent, and shipping one does not
+address the other.
+
 Priced on the same box, paired against a live control in the same batch:
 
 | Repair | Cost | Closes the hang? |
@@ -1378,3 +1389,52 @@ the architecture nor on which acquire instruction the JIT selects. The
 alternatives all pay a per-operation price on the hottest path in the system to
 fix a liveness bug that only manifests when the epoch table is full.
 
+
+---
+
+## What to change in production
+
+Collecting the actionable conclusions in one place, with the evidence grade for
+each. Costs are per-operation on the epoch hot path, measured on the x86 box
+against a live control in the same batch.
+
+| # | Change | Fixes | Cost | Evidence |
+| --- | --- | --- | ---: | --- |
+| 1 | **Announce via CAS on acquire, and refresh with an acquire load** (`Volatile.Read(ref CurrentEpoch)`) | use-after-free | **~0%** | hardware on two architectures + TLA+ + herd7 |
+| 2 | **Release store on the drain-list publish** (3 sites) | `NullReferenceException` / double free of a hybrid-log page | **0** | code reading + identical codegen |
+| 3 | **Release store on the `Release()` unpublish** | slot-handoff race, compiler sinking | **0** | code reading + identical codegen |
+| 4 | **Bound the semaphore wait** in `ReserveEntryWait` | lost wakeup (hang) | **0** | hardware litmus + herd7 |
+| 5 | Keep `Entry.threadId`, but stop treating it as ownership state | nothing — documentation | 0 | TLA+ |
+
+Changes 2, 3 and 4 are free, and 2 and 4 are the ones a reviewer is most likely
+to wave off. Both are real: the drain-list publish is unsynchronised message
+passing whose payload is a delegate that gets invoked, and the lost wakeup
+reproduces on ordinary x86 hardware at roughly one trial in fifty.
+
+Equally important is what **not** to do. Three plausible-looking repairs were
+priced and rejected, each because it puts a fence or a locked instruction on a
+path that every Tsavorite operation traverses:
+
+| Rejected repair | Cost | Why it was proposed |
+| --- | ---: | --- |
+| Full `StoreLoad` barrier after the announce | **+120%** | the obvious reading of "the announce needs a fence" |
+| `DMB ISH` on the refresh path | **+56%** | targets the refresh announce specifically |
+| `Interlocked.Exchange` for the unpublish or the wakeup | **+75%** | "it is only one locked instruction" |
+
+The last is the most instructive. It *is* only one locked instruction, and it is
+still worse than the full `MemoryBarrier` it was meant to replace, because `xchg`
+must take the actively contended epoch slot exclusive while `lock or [rsp],0`
+touches the thread's own always-local stack line. Instruction counts are not
+costs.
+
+### The one thing this study does not settle
+
+Every result here concerns whether a given ordering is *permitted* and whether it
+*reproduces*. Neither answers whether a particular shipping binary on a
+particular core will exhibit it, and the gap between those questions is where
+this investigation went wrong twice — once by treating an ARM-only diagnosis as
+settled when the defect also reproduces on x86, and once by verifying one half of
+an ordering pair and inferring the other. The fixes above are chosen so that they
+do not depend on resolving that gap: each is correct under the weakest reading of
+the .NET memory model, rather than under the strongest reading of what current
+JIT output happens to emit.
