@@ -104,10 +104,12 @@ namespace LightEpoch.Core
         /// separate epoch-advancing store needs ordering of its own, and on which side.
         /// <para>
         /// DEFAULTS TO 3 (acquire load), which is the fix. Modes 0 and 1 are known-broken and exist
-        /// only as A/B controls: on Neoverse-N2, resume-and-refresh with 8 pairs at a 180 s cap over
-        /// 20 runs per arm crashed 13/20 under mode 0 and 0/20 under mode 3, with the unfixed
-        /// baseline crashing 16/20 in the same interleaved batch (Fisher exact p = 1.3e-5).
-        /// Mode 2 also crashed 0/20 but is strictly more expensive than mode 3 for no benefit.
+        /// only as A/B controls. On Neoverse-N2, resume-and-refresh with 8 pairs, quarantine mode,
+        /// 3 runs per arm: mode 0 registered 2,475-435,814 violations and mode 1 (release) 235,051-848,621,
+        /// against an unfixed baseline of 115,601-1,035,797 — while mode 3 registered 0, 0, 0 across
+        /// roughly 30 million sampled opportunities, with the detector's self-test converting at 0.99998.
+        /// A release store is therefore no better than no fix at all: it orders the wrong side.
+        /// Mode 2 is also safe but strictly more expensive than mode 3 for no benefit.
         /// Selecting a mode other than 3 deliberately reintroduces the use-after-free.
         /// </para>
         /// </summary>

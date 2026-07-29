@@ -30,7 +30,8 @@ The bug is demonstrated in two complementary ways:
   * [x86-64 — logical use-after-free detection](#x86-64--logical-use-after-free-detection)
 * [Choosing the fix: the hazard is load-side](#choosing-the-fix-the-hazard-is-load-side)
   * [What each candidate costs and whether it works](#what-each-candidate-costs-and-whether-it-works)
-  * [The powered hardware matrix](#the-powered-hardware-matrix)
+  * [Graded violation counts on ARM64](#graded-violation-counts-on-arm64)
+  * [The powered crash matrix](#the-powered-crash-matrix)
   * [What the hardware actually executes](#what-the-hardware-actually-executes)
   * [Open questions](#open-questions)
   * [A note on method](#a-note-on-method)
@@ -184,7 +185,7 @@ that faults the baseline there, and survived every time.
 These cells are single runs, so read them as *existence* results: they establish
 that the baseline faults and roughly how fast, not a rate. Survival rows here
 carry no statistical weight on their own — the
-[powered hardware matrix](#the-powered-hardware-matrix) further down is what
+[powered crash matrix](#the-powered-crash-matrix) further down is what
 supports the "survived" claims, with 20 runs per arm and a live control.
 
 Faulting stack, every time — the reader dereferencing a page the epoch already freed:
@@ -292,16 +293,51 @@ not. The fix is therefore an **acquire load**, not a barrier:
 
 ### What each candidate costs and whether it works
 
-| Refresh announce | TLA+ (`armlb`) | herd7 (official `aarch64.cat`) | ARM64 hardware | x86 cost |
-|---|---|---|---|---|
-| plain store | **VIOLATED** (255 states) | **ALLOWED** | **crashed 13/20** | — |
-| release store | **VIOLATED** (175 states) | **ALLOWED** | crashed | — |
-| plain + `DMB ISH` | HOLDS (155 states) | FORBIDDEN (0/5) | crashed 0/20 | **+49%** |
-| **acquire load** | **HOLDS** (235 states) | **FORBIDDEN** | **crashed 0/20** | **+0.4%** |
+| Refresh announce | TLA+ (`armlb`) | herd7 (official `aarch64.cat`) | ARM64 crashes | ARM64 violations | x86 cost |
+|---|---|---|---|---|---|
+| plain store | **VIOLATED** (255 states) | **ALLOWED** | **13 / 20** | **2,475 – 435,814** | — |
+| release store | **VIOLATED** (175 states) | **ALLOWED** | crashed | **235,051 – 848,621** | — |
+| plain + `DMB ISH` | HOLDS (155 states) | FORBIDDEN (0/5) | 0 / 20 | not measured | **+49%** |
+| **acquire load** | **HOLDS** (235 states) | **FORBIDDEN** | **0 / 20** | **0, 0, 0** | **+0.4%** |
 
-Hardware column comes from the powered matrix below.
+Note the release store: it is *not* merely weaker than the fix, it violates at a
+rate comparable to the unfixed baseline. That is the predicted result — a release
+store orders the wrong side, publishing the slot while doing nothing to order the
+reader's later loads — and it is the row that most clearly separates "a barrier
+somewhere" from "the right barrier".
 
-### The powered hardware matrix
+### Graded violation counts on ARM64
+
+Crash-or-not is a coin flip, and distinguishing arms through a binary outcome
+needs large samples. Quarantine mode replaces it with a *count*: the reclaimer
+stamps a poison sentinel instead of unmapping, so the process never dies and each
+run returns how many times a protected reader observed poison. Run as
+`resume-and-refresh --quarantine --pairs 8 --rounds 10000000`, three interleaved
+runs per arm:
+
+| Arm | Violations (3 runs) | Sampled opportunities |
+|---|---|---|
+| `baseline` (unfixed) — **control** | **1,035,797 / 640,862 / 115,601** | 11.4M – 15.2M |
+| `casannounce` + `LE_REFRESH_ORDER=plain` | **435,814 / 253,499 / 2,475** | 18.1M – 19.5M |
+| `casannounce` + `LE_REFRESH_ORDER=release` | **478,515 / 848,621 / 235,051** | 6.0M – 13.9M |
+| `casannounce` + acquire load (default) | **0 / 0 / 0** | 6.3M – 12.9M |
+| `fullbarrier` | **0 / 0 / 0** | 12.5M – 17.3M |
+
+What makes those zeros meaningful is the sensitivity control. `--self-test`
+poisons every round, as if reclamation had been wrongly authorised every time; on
+this machine it converted 297,375 of 297,381 sampled rounds into detections — a
+conversion rate of **0.99998**, spread evenly across all ten deciles rather than
+clustered at startup. So an arm that was fully broken should register violations
+on the order of its sampled-opportunity count. The acquire load registered **zero
+across roughly 30 million opportunities**. That is a strong null, not an absence
+of testing.
+
+This is also the measurement that rules out the harness itself being the source
+of the faults: `fullbarrier` is a known-safe reference, and it reports exactly
+zero while the baseline reports hundreds of thousands under identical conditions.
+A harness generating false positives could not tell those two apart.
+
+### The powered crash matrix
 
 `resume-and-refresh --pairs 8`, 180 s cap, **20 runs per arm**, interleaved
 across two Neoverse-N2 VMs so that no single arm can be biased by a slow VM or a
@@ -401,6 +437,15 @@ expected to fail:
 * The non-LSE codegen path has been exercised on hardware, but that batch had no
   live sensitivity control, so under the rule below it currently proves nothing.
   (The non-LSE path *is* covered formally, by the composed litmus above.)
+* One ARM batch reported every arm — including the two known-safe ones —
+  terminating at a tight 42–56 s cluster. It ran with a finite `--rounds 1000000`
+  where every other batch used the 200,000,000 default, and at the measured
+  throughput that count *completes* in about that time; the same configuration
+  reproduced on x86 exits cleanly with a zero status. So these are very likely
+  normal completions counted as crashes rather than faults, and the quarantine
+  counts above (`fullbarrier` and the acquire load at exactly zero) are hard to
+  reconcile with them being real. It is listed here rather than discarded because
+  the per-run exit codes have not yet been re-audited.
 
 `WeakMemory.tla` cannot decide the RCsc/RCpc question either way — its acquire
 abstraction does not distinguish the two, and says so in a comment at

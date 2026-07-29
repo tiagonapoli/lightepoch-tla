@@ -133,7 +133,7 @@ namespace LightEpoch.Repro.Common
                 // decile would mean the harness reaches some absorbing state and stops
                 // racing, which would make the totals meaningless.
                 string spread = string.Join(" ", violationDeciles);
-                Console.Error.WriteLine($"USE-AFTER-FREE: reader read a quarantined page while protected. violations={observed:N0} firstRound={Volatile.Read(ref firstViolationRound):N0} lastRound={Volatile.Read(ref lastViolationRound):N0} deciles=[{spread}] elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"USE-AFTER-FREE: reader read a quarantined page while protected. violations={observed:N0} sampledRounds={sampled:N0} drains={Volatile.Read(ref drains):N0} quarantined={Volatile.Read(ref quarantines):N0} firstRound={Volatile.Read(ref firstViolationRound):N0} lastRound={Volatile.Read(ref lastViolationRound):N0} deciles=[{spread}] elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
                 return 1;
             }
 
