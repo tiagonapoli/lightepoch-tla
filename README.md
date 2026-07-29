@@ -456,15 +456,6 @@ expected to fail:
 * The non-LSE codegen path has been exercised on hardware, but that batch had no
   live sensitivity control, so under the rule below it currently proves nothing.
   (The non-LSE path *is* covered formally, by the composed litmus above.)
-* One ARM batch reported every arm — including the two known-safe ones —
-  terminating at a tight 42–56 s cluster. It ran with a finite `--rounds 1000000`
-  where every other batch used the 200,000,000 default, and at the measured
-  throughput that count *completes* in about that time; the same configuration
-  reproduced on x86 exits cleanly with a zero status. So these are very likely
-  normal completions counted as crashes rather than faults, and the quarantine
-  counts above (`fullbarrier` and the acquire load at exactly zero) are hard to
-  reconcile with them being real. It is listed here rather than discarded because
-  the per-run exit codes have not yet been re-audited.
 
 `WeakMemory.tla` cannot decide the RCsc/RCpc question either way — its acquire
 abstraction does not distinguish the two, and says so in a comment at
@@ -497,6 +488,37 @@ line every 10 s carrying the reclaimed-page count (and, in shared-epoch mode, th
 slot-reuse report), so a killed run still leaves evidence that it was doing the
 work its verdict claims. Measured on the fixed build, reclamation is unaffected:
 `freedPages` equals the round count exactly.
+
+The one defect that ran the other way — manufacturing a **false alarm** rather
+than a false negative — was in the PowerShell driver, and it briefly appeared to
+demolish the fix: a batch reported *every* arm crashing 10/10, including the two
+independently known-safe ones. On **Windows PowerShell 5.1**,
+`Start-Process -PassThru` returns a process object that does not cache the
+process handle, so after `WaitForExit` the `ExitCode` property yields `$null`
+instead of the status. The classifier was
+
+```powershell
+if ($p.WaitForExit(180000)) { $code = $p.ExitCode; if ($code -ne 0) { 'CRASHED' } else { 'COMPLETED' } }
+```
+
+and `$null -ne 0` is `$true`, so **every** process that exited before the time
+cap was stamped `CRASHED` and the `COMPLETED` branch was unreachable. Running
+that batch's exact configuration through a byte-identical copy of the driver
+reproduced it: all four arms were stamped `CRASHED` while all four printed their
+normal end-of-run summary, at 26.8–60.1 s. (PowerShell 7 returns the status
+correctly, which is why this never showed up locally; touching `$p.Handle` once
+before `WaitForExit` fixes it on 5.1.)
+
+What saved every other batch was an accident: they all pass
+`--rounds 2000000000`, which cannot finish inside the 180 s cap, so "exited early"
+really did imply "crashed" and the verdicts are sound. The one batch with a
+`--rounds` small enough to *complete* is the only crash-verdict batch affected,
+and it is discarded. The graded quarantine counts are parsed from the process
+output rather than its status, so they were never affected — which is the general
+lesson: **a verdict derived from a process's exit status is only as trustworthy as
+the shell's ability to report that status, whereas one parsed from the program's
+own output is self-describing.** Prefer instruments that say what they observed
+over instruments that say only whether something died.
 
 The sharpest example: tuning `--reclaimer-delay` to maximise how often the
 reader is mid-dereference when a page is reclaimed looks like a large sensitivity

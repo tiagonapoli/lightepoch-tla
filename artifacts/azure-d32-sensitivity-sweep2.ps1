@@ -9,4 +9,6 @@ $configs=@(
 '--impl baseline --pattern bare --quarantine --rounds 10000000 --deref 20000 --pairs 1 --reader-core 6 --reclaimer-core 4 --disturber-cores 0,2,8,10 --reclaimer-delay 0',
 '--impl baseline --pattern resume-and-refresh --quarantine --rounds 10000000 --deref 20000 --pairs 1 --reader-core 6 --reclaimer-core 4 --disturber-cores 0,2,8,10 --reclaimer-delay 0'
 )
-foreach($a in $configs){ Write-Host "=== $a"; $sw=[Diagnostics.Stopwatch]::StartNew(); $p=Start-Process -FilePath $exe -ArgumentList $a -NoNewWindow -Wait -PassThru; $sw.Stop(); Write-Host "EXIT:$($p.ExitCode) WALL:$([math]::Round($sw.Elapsed.TotalSeconds,2))" }
+# $p.Handle must be read before WaitForExit: on Windows PowerShell 5.1 a process
+# from Start-Process -PassThru does not cache its handle, so ExitCode yields $null.
+foreach($a in $configs){ Write-Host "=== $a"; $sw=[Diagnostics.Stopwatch]::StartNew(); $p=Start-Process -FilePath $exe -ArgumentList $a -NoNewWindow -PassThru; $null=$p.Handle; $p.WaitForExit(); $sw.Stop(); Write-Host "EXIT:$($p.ExitCode) WALL:$([math]::Round($sw.Elapsed.TotalSeconds,2))" }
