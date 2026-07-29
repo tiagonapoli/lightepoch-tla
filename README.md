@@ -538,7 +538,12 @@ have shown this never appeared at all. Both unmap harnesses now emit a progress
 line every 10 s carrying the reclaimed-page count (and, in shared-epoch mode, the
 slot-reuse report), so a killed run still leaves evidence that it was doing the
 work its verdict claims. Measured on the fixed build, reclamation is unaffected:
-`freedPages` equals the round count exactly.
+`freedPages` equals the round count exactly. The ARM64 runs now carry the same
+evidence from the time-capped runs themselves rather than from an auxiliary
+finite run — on the **fixed** arm, `rounds=7,864,320 freedPages=7,864,321
+slot reuse: 8/8` in shared-epoch mode, and `rounds=1,638,400
+freedPages=1,638,401` in `resume-and-refresh`. A build reclaiming several million
+pages while surviving is not surviving by failing to reclaim.
 
 The one defect that ran the other way — manufacturing a **false alarm** rather
 than a false negative — was in the PowerShell driver, and it briefly appeared to
