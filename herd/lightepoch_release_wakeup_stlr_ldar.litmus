@@ -1,0 +1,30 @@
+AArch64 LightEpoch-release-wakeup-stlr-ldar
+(*
+ * U2: lost wakeup between Release() and ReserveEntryWait().
+ *
+ * P0 is the releasing thread. It publishes its slot as free and then probes
+ * waiterCount to decide whether to signal the semaphore. This is the shape the
+ * CAS-announce fix currently emits: a release store followed by an acquire load.
+ *
+ * P1 is a thread waiting for a slot. It registers itself by incrementing
+ * waiterCount with a full-fence RMW, then re-probes the slot with the claim CAS
+ * before sleeping.
+ *
+ * The pair is store-buffering. A hang requires both stale reads at once:
+ * P0 sees waiterCount == 0 so it never signals, and P1's claim CAS fails so it
+ * sleeps. The slot is free and nobody is coming to wake P1.
+ *)
+{
+localCurrentEpoch=1;
+waiterCount=0;
+0:X0=localCurrentEpoch; 0:X1=waiterCount;
+1:X0=waiterCount; 1:X1=localCurrentEpoch;
+}
+ P0                 | P1                 ;
+ MOV W4,#0          | MOV W4,#1          ;
+ STLR W4,[X0]       | LDADDAL W4,W5,[X0] ;
+ LDAR W5,[X1]       | MOV W6,#0          ;
+                    | MOV W7,#2          ;
+                    | CAS W6,W7,[X1]     ;
+
+exists (0:X5=0 /\ 1:X6=1)

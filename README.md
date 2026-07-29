@@ -31,6 +31,7 @@ The bug is demonstrated in two complementary ways:
 * [Choosing the fix: the hazard is load-side](#choosing-the-fix-the-hazard-is-load-side)
   * [What each candidate costs and whether it works](#what-each-candidate-costs-and-whether-it-works)
   * [Graded violation counts on ARM64](#graded-violation-counts-on-arm64)
+  * [The same matrix on x86-64: an architectural double dissociation](#the-same-matrix-on-x86-64-an-architectural-double-dissociation)
   * [The powered crash matrix](#the-powered-crash-matrix)
   * [What the hardware actually executes](#what-the-hardware-actually-executes)
   * [Open questions](#open-questions)
@@ -355,6 +356,37 @@ This is also the measurement that rules out the harness itself being the source
 of the faults: `fullbarrier` is a known-safe reference, and it reports exactly
 zero while the baseline reports hundreds of thousands under identical conditions.
 A harness generating false positives could not tell those two apart.
+
+### The same matrix on x86-64: an architectural double dissociation
+
+The diagnosis says the refresh hazard is *load-side* — the reader announces an
+epoch it has not yet caught up to — and that x86 is immune to it because every
+x86 load already has acquire semantics. That is a falsifiable prediction, and the
+two architectures disagree in exactly the way it requires. Same harness, same
+graded counts, `resume-and-refresh --quarantine --pairs 1 --rounds 30000000` with
+eight disturber threads on distinct physical cores, three interleaved cycles:
+
+| Arm | x86-64 violations (3 cycles) | x86 opportunities | ARM64 violations |
+|---|---|---|---|
+| `baseline` — **control** | **25 / 16 / 18** | 8.8M | 1,035,797 / 640,862 / 115,601 |
+| `casannounce` + `plain` refresh | **0 / 0 / 0** | 8.9M | **435,814 / 253,499 / 2,475** |
+| `casannounce` + `release` refresh | **0 / 0 / 0** | 10.3M | **478,515 / 848,621 / 235,051** |
+| `casannounce` + acquire load | 0 / 0 / 0 | 9.6M | 0 / 0 / 0 |
+| `fullbarrier` | 0 / 0 / 0 | 4.1M | 0 / 0 / 0 |
+
+The two middle rows are the whole point. `plain` and `release` refresh violate on
+ARM64 at rates comparable to the unfixed baseline, and on x86 they do not violate
+at all — while the baseline violates on **both**. Three of the four candidate arms
+carried *more* detector opportunity than the control did, so the x86 zeros are not
+a power artifact.
+
+That split is what a load-side diagnosis predicts and what a store-side one
+cannot explain. If the hazard were the announce *store* escaping late, x86's store
+buffer would expose it too, and `plain` would fault on both machines. Instead the
+refresh hazard vanishes precisely where loads are already acquire. The baseline
+still fails on x86 because its *other* defect is the acquire-side `SB` race — and
+StoreLoad is the one reordering x86-TSO does permit. Each architecture sees the
+half of the bug its memory model allows.
 
 ### The powered crash matrix
 

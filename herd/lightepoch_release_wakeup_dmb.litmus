@@ -1,0 +1,22 @@
+AArch64 LightEpoch-release-wakeup-dmb
+(*
+ * U2 candidate fix B: keep the release store and add an explicit full barrier
+ * before probing waiterCount. Correct, but it adds an instruction to the
+ * per-operation release path, which measured +4.2 ns/op when a redundant
+ * barrier was added on the acquire side. Kept as a comparison point against
+ * the SWPAL spelling, which costs nothing extra.
+ *)
+{
+localCurrentEpoch=1;
+waiterCount=0;
+0:X0=localCurrentEpoch; 0:X1=waiterCount;
+1:X0=waiterCount; 1:X1=localCurrentEpoch;
+}
+ P0                 | P1                 ;
+ MOV W4,#0          | MOV W4,#1          ;
+ STLR W4,[X0]       | LDADDAL W4,W5,[X0] ;
+ DMB ISH            | MOV W6,#0          ;
+ LDAR W5,[X1]       | MOV W7,#2          ;
+                    | CAS W6,W7,[X1]     ;
+
+exists (0:X5=0 /\ 1:X6=1)

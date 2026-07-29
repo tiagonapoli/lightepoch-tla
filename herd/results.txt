@@ -907,3 +907,48 @@ objectFreed=0;
 
 exists (0:X8=0 /\ 0:X9=0 /\ 0:X6=0 /\ objectFreed=1)
 ```
+
+
+Lost wakeup in Release() / ReserveEntryWait() - the RCsc/RCpc question
+=====================================================================
+Date: 2026-07-29
+
+A barrier audit of the production class proposed that Release() contains a
+store-buffering pair with a fence on only one side:
+
+  Releaser (Release())            Waiter (ReserveEntryWait())
+    STORE localCurrentEpoch = 0     Interlocked.Increment(waiterCount)  <- full-fence RMW
+    LOAD  waiterCount               CAS on localCurrentEpoch (claim)
+    if (waiterCount > 0) signal     if the CAS fails -> semaphore.Wait()
+
+If the releaser reads waiterCount as a stale 0 while the waiter's claim CAS reads
+localCurrentEpoch as a stale non-zero, nobody signals and the waiter sleeps
+forever on a slot that is in fact free. The audit graded this as an unconditional
+hang on the grounds that an acquire load cannot close store buffering.
+
+That reasoning is correct for the abstract acquire of the .NET memory model and
+WRONG for the instruction AArch64 emits, because AArch64 acquire/release are
+RCsc: an LDAR may not be reordered before an earlier STLR, so STLR;LDAR supplies
+StoreLoad ordering on its own. LDAPR is RCpc and drops exactly that edge.
+
+Same command line as the tables above.
+
+| Releaser shape | Waiter RMW | File | Verdict |
+|---|---|---|---|
+| STLR ; LDAR | LDADDAL | lightepoch_release_wakeup_stlr_ldar.litmus | Never 0 7 (forbidden) |
+| STLR ; LDAPR | LDADDAL | lightepoch_release_wakeup_stlr_ldapr.litmus | Sometimes 3 7 (allowed) |
+| SWPAL ; LDAR | LDADDAL | lightepoch_release_wakeup_swpal.litmus | Never 0 7 (forbidden) |
+| STLR ; DMB ISH ; LDAR | LDADDAL | lightepoch_release_wakeup_dmb.litmus | Never 0 7 (forbidden) |
+| STLR ; LDAR (CONTROL) | LDADD (relaxed) | lightepoch_release_wakeup_waiter_relaxed.litmus | Sometimes 3 7 (allowed) |
+
+The last row is the sensitivity control and it is what makes the three Never
+verdicts worth anything: weakening the waiter's RMW to a relaxed LDADD does
+produce the hang, so the litmus can express the outcome and the forbidden
+verdicts are real forbiddance rather than a malformed test.
+
+Conclusion: the existence of this hang does not depend on the algorithm. It
+depends only on whether the JIT emits ldar or ldapr for the volatile read of
+waiterCount. Neoverse N2 implements FEAT_LRCPC, so the JIT is permitted to choose
+ldapr. Pending disassembly on ARM64 hardware. Note that at the .NET memory model
+level the concern stands regardless, since the spec promises only acquire and
+does not promise RCsc.
