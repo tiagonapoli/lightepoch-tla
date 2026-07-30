@@ -555,9 +555,9 @@ docker build -t lightepoch-herd herd/jit-derived
 docker run --rm lightepoch-herd
 ```
 
-Ten tests, all matching expectation, each `Never` paired with a row that must be
-violated. It reaches the same verdicts as the hand-written suite, which is the
-point — but it adds three things that suite could not give:
+Seventeen tests, all matching expectation, each `Never` paired with a row that
+must be violated. It reaches the same verdicts as the hand-written suite on the
+hazards that suite covered — but it adds four things:
 
 * **The x86 side, which was never covered here.** The two x86 `ProtectAndDrain`
   listings are byte-identical, and herd7 gives both tests the same hash. "The
@@ -566,11 +566,27 @@ point — but it adds three things that suite could not give:
 * **The mechanism behind the ARM64 refresh hazard.** On the unfixed build the
   read of `CurrentEpoch` is not a standalone `ldr` at all — RyuJIT merges it
   with the `tableAligned` pointer load into a single unordered `ldp`.
-* **A correction.** `DOTNET_JitDisasm` was recorded above as producing no
-  output, which is why `artifacts/jit-dumps.md` was obtained by dumping and
-  externally disassembling emitted bytes. The knob works on a release runtime;
-  it matches **bare method names**, and the `Class:Method` form it was given
-  silently matches nothing.
+* **A third use-after-free, not previously identified.** The reader's
+  critical-section dereference and its own slot clear in `Release()` are a
+  Load→Store pair with no barrier between them on the unfixed build. AArch64
+  permits that reordering, so the slot can be observed as free while the
+  dereference is still outstanding, and a reclaimer scanning in that window
+  frees the object under a live reader. It is ARM-only — x86-TSO preserves
+  Load→Store — and it is closed by the same `Volatile.Write` that the
+  [`threadId` handover](#is-entrythreadid-still-needed) requires. That store
+  therefore does two independent jobs, and weakening it back to a plain store
+  would reopen this even if the handover were addressed another way.
+* **The whole sequence, composed.** `Acquire` → `ProtectAndDrain` → critical
+  section → `Release` against a full reclaimer, with every memory access of the
+  reduced listing present in program order, rather than one hazard shape at a
+  time. Both unfixed rows are violated; both fixed rows are `Never`. This is
+  what says the shape-by-shape decomposition did not miss an interaction.
+
+And one correction: `DOTNET_JitDisasm` was recorded above as producing no
+output, which is why `artifacts/jit-dumps.md` was obtained by dumping and
+externally disassembling emitted bytes. The knob works on a release runtime;
+it matches **bare method names**, and the `Class:Method` form it was given
+silently matches nothing.
 
 Findings are written up per architecture in
 `herd/jit-derived/memory-ordering-bugs-found.md`.
