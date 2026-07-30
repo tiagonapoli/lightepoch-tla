@@ -47,6 +47,7 @@ The bug is demonstrated in two complementary ways:
   * [The raw TLC output](#the-raw-tlc-output)
   * [The same trace, step by step](#the-same-trace-step-by-step)
   * [Reading the model yourself](#reading-the-model-yourself)
+  * [What the memory models could not express](#what-the-memory-models-could-not-express)
 * ["But Tsavorite already adds the barrier anyway"](#but-tsavorite-already-adds-the-barrier-anyway)
 * [Is `Entry.threadId` still needed?](#is-entrythreadid-still-needed)
   * [A verdict that turned out to be a theorem](#a-verdict-that-turned-out-to-be-a-theorem)
@@ -1123,10 +1124,88 @@ memory is released.
 | [`tla/memory-models/X86TSO.tla`](tla/memory-models/X86TSO.tla) | Calibration: reproduces the textbook SB litmus, proving the harness is neither too weak nor too strong. |
 | [`tla/epoch/LightEpoch.tla`](tla/epoch/LightEpoch.tla) | The trace above. **VIOLATED.** |
 | [`tla/epoch/LightEpochResumeAndRefresh.tla`](tla/epoch/LightEpochResumeAndRefresh.tla) | Tsavorite's per-operation sequence. **VIOLATED.** |
-| [`tla/epoch/fixes/`](tla/epoch/fixes) | The same two specs with the barrier added. **HOLD.** |
+| [`tla/epoch/fixes/`](tla/epoch/fixes) | The same two specs with the barrier added. **HOLD.** Also the CAS-carries-the-announce fix and its controls, and [`CasAnnounceReleaseLoadStore.tla`](tla/epoch/fixes/CasAnnounceReleaseLoadStore.tla), which models the one reordering the substrates above cannot — see [below](#what-the-memory-models-could-not-express). |
 | [`tla/tsavorite/`](tla/tsavorite) | Two **real Tsavorite flows** run against each other, with Tsavorite's own barriers included. See below. |
 
 Each epoch spec is built on top of `StoreBuffer.tla`.
+
+### What the memory models could not express
+
+The herd7 suite derived from the JIT's own output found a use-after-free that
+**every spec above misses**, and it is worth being precise about why, because
+the reason is structural rather than an oversight in any one spec.
+
+The hazard is the reader's dereference against the reader's *own* unpublish:
+
+```asm
+    ldr  x2, [data]            ; the dereference, inside the critical section
+    str  xzr, [slotEpoch]      ; Release() -- a PLAIN store on main
+```
+
+AArch64 permits `Load→Store` reordering. Nothing separates these two, so the
+slot can be observed as free while the load is still outstanding; a reclaimer
+scanning in that window frees the object out from under it. On x86 this is
+safe for free, and herd7 confirms both: `arm64-release-loadstore-main` is
+`Sometimes`, `x86-release-loadstore-main` is `Never`.
+
+**Two independent reasons the TLA+ could not see it.**
+
+*The substrate cannot express a load in flight.* Both `StoreBuffer.tla` and
+`WeakMemory.tla` bind a load's value at its program point — `Load(p, f)` reads
+memory (or the processor's view) and returns immediately. That is enough for
+three of the four relaxation axes: stores can be delayed (`StoreLoad`),
+reordered among themselves (`StoreStore`, the `arm` model), and loads can
+return stale values (`LoadLoad`, `WeakMemory`'s per-field view lag). But there
+is no state for a load that has been *issued* and not yet *bound*, so a load
+can never be delayed past a later store. Both modules say so in their own
+headers: under `tso`, "StoreStore, LoadLoad, and LoadStore order are
+preserved"; `arm` "relaxes store visibility order and nothing else"; and view
+lag is "the only behaviour [`WeakMemory`] adds over `StoreBuffer`".
+
+*The critical section was not a memory access.* Even in a substrate that did
+model `Load→Store`, the existing specs would have nothing to reorder.
+`CasAnnounceOneReader`'s `Dereference` step reads nothing — it only sets
+`inCriticalSection' = FALSE` and leaves `memory` and `storeBuffer` `UNCHANGED`.
+And because it does that *before* `ClearThreadId` and `ReleaseSlot`, the window
+`NoUseAfterFree == ~(objectFreed /\ inCriticalSection)` watches has already
+closed by the time `Release()` runs. The whole hazard lives in a window the
+specs had declared shut.
+
+**The gap is now closed**, by
+[`tla/epoch/fixes/CasAnnounceReleaseLoadStore.tla`](tla/epoch/fixes/CasAnnounceReleaseLoadStore.tla).
+It makes the dereference a real load of `objectFreed` and splits it into
+`IssueDereference` (the load is in flight, its value undetermined) and
+`BindDereference` (the load is satisfied, taking whatever is globally visible
+then). `ReleaseSlot` is enabled with the load still outstanding only when the
+architecture relaxes `Load→Store` *and* the store is plain — which is the
+entire content of the relaxation, stated once. The algorithm is the CAS-carried
+announce in all three rows, so any violation is attributable to the release
+store alone.
+
+| Config | Release store | Result | |
+| --- | --- | --- | --- |
+| `_plain_tso` | plain | **HOLDS** | x86-TSO preserves `Load→Store` |
+| `_plain_arm` | plain | **VIOLATED** | the bug — and the liveness control for the other two rows |
+| `_release_arm` | release | **HOLDS** | `Volatile.Write` → `STLR` orders the dereference before the unpublish |
+
+Three for three against herd7. Both `HOLDS` rows were separately checked for
+vacuity: negating the property to `derefSaw # "live"` is violated in each, so
+the reader really does execute and bind a dereference rather than passing by
+never getting there.
+
+This is a *targeted* model of one reordering, not a general treatment of
+in-flight loads. Only the dereference is split, because it is the only load in
+the protocol with a store after it in the same thread. Splitting every load
+into issue and bind would restructure all sixteen specs and multiply the state
+space for no additional finding.
+
+Two consequences worth carrying forward. First, `Volatile.Write` in `Release()`
+is doing **two** independent jobs: the store-store handover to the next owner
+of the slot, *and* this use-after-free, which exists in `main` today. Weakening
+it because the handover was addressed some other way would silently reopen the
+second. Second, this suite establishes correctness only against the reorderings
+its substrates model — `StoreLoad`, `StoreStore`, `LoadLoad`, and now
+`Load→Store` at the dereference. That is the honest scope.
 
 ## "But Tsavorite already adds the barrier anyway"
 

@@ -202,6 +202,25 @@ run "$HERE/epoch/fixes" CasAnnounceResumeRefreshWeak  CasAnnounceResumeRefreshWe
 run "$HERE/epoch/fixes" CasAnnounceResumeRefreshWeak  CasAnnounceResumeRefreshWeak_fence_armlb.cfg   HOLDS    "a full StoreLoad barrier also closes it, but is strictly more than needed"
 
 echo ""
+echo "========= Load->Store: the dereference against the reader's own unpublish ========="
+echo "# Every spec above asks what OTHER threads observe of the reader's stores."
+echo "# This one asks whether the reader is still using the object when it announces"
+echo "# that it is not:  ldr x2,[data]  /  str xzr,[slotEpoch]. AArch64 may make the"
+echo "# unpublish visible first, so a scan in that window frees the object under a"
+echo "# load that has not been satisfied."
+echo "#"
+echo "# NEITHER StoreBuffer NOR WeakMemory can express this: both bind a load's value"
+echo "# at its program point, so a store may be delayed but a load never can be. And"
+echo "# in the other specs the critical section is not a memory access at all --"
+echo "# CasAnnounceOneReader's Dereference only flips a flag -- so there would be"
+echo "# nothing to reorder even in a substrate that modelled it. This spec splits the"
+echo "# dereference into issue and bind, which is the smallest change that makes the"
+echo "# reordering expressible. The middle row is the liveness control."
+run "$HERE/epoch/fixes" CasAnnounceReleaseLoadStore  CasAnnounceReleaseLoadStore_plain_tso.cfg   HOLDS    "x86-TSO preserves Load->Store, so the plain unpublish is safe there"
+run "$HERE/epoch/fixes" CasAnnounceReleaseLoadStore  CasAnnounceReleaseLoadStore_plain_arm.cfg   VIOLATED "the plain unpublish is observed while the dereference is still in flight"
+run "$HERE/epoch/fixes" CasAnnounceReleaseLoadStore  CasAnnounceReleaseLoadStore_release_arm.cfg HOLDS    "Volatile.Write -> STLR orders the dereference before the unpublish"
+
+echo ""
 if [[ $failures -ne 0 ]]; then
   echo "$failures spec result(s) did not match expectations."
   exit 1

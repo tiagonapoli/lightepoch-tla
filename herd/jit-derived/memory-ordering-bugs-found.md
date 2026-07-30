@@ -219,6 +219,15 @@ x86-TSO preserves Load→Store, so the shape cannot arise there — the x86 row
 records that, with the AArch64 row as the live control proving the encoding can
 detect the hazard when the architecture permits it.
 
+A4 was invisible to the TLA+ suite for two structural reasons: neither
+`StoreBuffer.tla` nor `WeakMemory.tla` can express a load that has been issued
+and not yet bound, and the critical section in those specs is not a memory
+access at all. Both are now addressed by
+[`CasAnnounceReleaseLoadStore.tla`](../../tla/epoch/fixes/CasAnnounceReleaseLoadStore.tla),
+which reproduces the three rows above (`tso`+plain HOLDS, `arm`+plain VIOLATED,
+`arm`+release HOLDS). See the repository README, "What the memory models could
+not express".
+
 ---
 
 ## The whole sequence, composed
