@@ -34,6 +34,7 @@ The bug is demonstrated in two complementary ways:
   * [The same matrix on x86-64: an architectural double dissociation](#the-same-matrix-on-x86-64-an-architectural-double-dissociation)
   * [The powered crash matrix](#the-powered-crash-matrix)
   * [What the hardware actually executes](#what-the-hardware-actually-executes)
+  * [Re-deriving all of it from the JIT's own dump](#re-deriving-all-of-it-from-the-jits-own-dump)
   * [Open questions](#open-questions)
   * [A note on method](#a-note-on-method)
 * [Methodology](#methodology)
@@ -534,6 +535,45 @@ The writer-side requirement is satisfied by construction in production:
 fully sequentially consistent, so they compile to the `AL` form. The relaxed
 cell is a what-if that exists to prove the encoding has teeth, not a reachable
 production state.
+
+### Re-deriving all of it from the JIT's own dump
+
+The litmus files above are hand-written: each encodes the instruction sequence
+we believed RyuJIT emits, justified separately by the disassembly in the table
+above. Two artifacts that can drift apart, with the mapping between them living
+in prose.
+
+`herd/jit-derived/` redoes the exercise from the other end. It starts from
+verbatim `DOTNET_JitDisasm` output for both the unfixed and fixed `LightEpoch`,
+on **x86-64 and AArch64**, committed in `herd/jit-derived/jit/`; reduces it to
+the shared-memory instructions that carry the ordering, with every removal
+itemised in `REDUCTION.md`; and checks those against `x86tso.cat` and
+`aarch64.cat`.
+
+```
+docker build -t lightepoch-herd herd/jit-derived
+docker run --rm lightepoch-herd
+```
+
+Ten tests, all matching expectation, each `Never` paired with a row that must be
+violated. It reaches the same verdicts as the hand-written suite, which is the
+point — but it adds three things that suite could not give:
+
+* **The x86 side, which was never covered here.** The two x86 `ProtectAndDrain`
+  listings are byte-identical, and herd7 gives both tests the same hash. "The
+  acquire load is free on x86" stops being an expectation and becomes an
+  observation.
+* **The mechanism behind the ARM64 refresh hazard.** On the unfixed build the
+  read of `CurrentEpoch` is not a standalone `ldr` at all — RyuJIT merges it
+  with the `tableAligned` pointer load into a single unordered `ldp`.
+* **A correction.** `DOTNET_JitDisasm` was recorded above as producing no
+  output, which is why `artifacts/jit-dumps.md` was obtained by dumping and
+  externally disassembling emitted bytes. The knob works on a release runtime;
+  it matches **bare method names**, and the `Class:Method` form it was given
+  silently matches nothing.
+
+Findings are written up per architecture in
+`herd/jit-derived/memory-ordering-bugs-found.md`.
 
 ### Open questions
 
