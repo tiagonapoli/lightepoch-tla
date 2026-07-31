@@ -75,6 +75,16 @@ run arm64-release-plainstore   Sometimes "counterfactual: a plain store here wou
 run arm64-release-fixed        Never     "STLR keeps the tid clear ordered before the slot is handed over"
 
 note ""
+note "--- Hazard 3b: the tag handoff, on x86 -- does ThisInstanceProtected() still hold? ---"
+note "# Moving the claim CAS off Entry.threadId leaves the tag a plain store trailing"
+note "# the claim, so the arriving owner writes it while the departing owner's clear of"
+note "# the same field may still be in flight. These two rows isolate the store ORDER in"
+note "# Release() from the release store itself: both are plain MOVs on x86, so any"
+note "# difference between them is the order alone."
+run x86-release-tid-main       Sometimes "upstream's order publishes the slot free first, so the trailing clear can wipe the new owner's tag"
+run x86-release-tid-fixed      Never     "clearing the tag first orders it before the claim RMW that hands the slot over"
+
+note ""
 note "--- Hazard 4: the critical section vs Release -- Load->Store ---"
 note "# The reader's own dereference against its own slot clear. Distinct from"
 note "# hazard 3: that one is about the NEXT owner of the slot, this one is about"

@@ -1,0 +1,28 @@
+X86 x86-release-tid-main
+(* The tag handoff between the departing and the arriving owner of a slot,
+   with upstream's Release() ORDER kept on top of the fix's claim RMW.
+
+   This is the shape that decides whether ThisInstanceProtected() still tells
+   the truth after the slot-claim CAS moved off Entry.threadId. The tag is now
+   a plain store trailing the claim, so the arriving owner writes it while the
+   departing owner's clear of the same field may still be in flight.
+
+   P0 is the departing owner. It publishes the slot free (lce=0) and then
+   clears its tag (tid=0). P1 is the arriving owner: it claims the slot with a
+   locked RMW and stamps its own tag.
+
+   No weak memory is needed. On x86 the release store is an ordinary MOV, so
+   P0's two stores leave the store buffer in program order and the free is
+   visible while the clear is still pending -- long enough for P1 to claim,
+   tag, and then have P0's clear land on top of its tag.
+
+   The condition is the resurrection: the slot is owned by P1 (lce=1) yet
+   carries no tag (tid=0). Every later ThisInstanceProtected() by P1 answers
+   "not protected" while P1 holds the slot, because nothing rewrites tid until
+   the slot changes hands again. *)
+{ lce=0; tid=0; }
+ P0            | P1                ;
+ MOV [lce],$0  | MOV EDX,$1        ;
+ MOV [tid],$0  | XCHG [lce],EDX    ;
+               | MOV [tid],$2      ;
+exists (lce=1 /\ tid=0)

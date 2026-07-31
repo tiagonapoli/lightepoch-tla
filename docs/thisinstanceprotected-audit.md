@@ -238,6 +238,36 @@ LE_RELEASE_ORDER=volatile dotnet run --project src/LightEpoch.TidLitmus -c Relea
     --seconds 60 --slots 2
 ```
 
+An overnight soak (`artifacts/tidlitmus-soak.ps1`) runs the same A/B on a 32-vCPU
+Intel Azure VM, sweeping slot spaces 1/2/4/8 and thread counts up to 4x the core
+count, and re-runs the control **every cycle** — a ten-hour clean run only means
+something if the harness could still catch the defect at hour ten. On that machine
+the control reports ~925 violations per 530 M rounds, so the detector is roughly 10x
+more sensitive there than on the dev box.
+
+### 6c. Architecture-level — `herd/jit-derived/litmus/x86-release-tid-{main,fixed}.litmus`
+
+The hardware A/B says the fix survives on the silicon in front of us. herd7 says the
+*architecture* forbids the failure on any x86 implementation. Both new rows isolate
+the store **order** in `Release()` from the release store itself — on x86 both stores
+are plain `MOV`, so the only difference between the rows is which comes first:
+
+| Test | Result | |
+| --- | --- | --- |
+| `x86-release-tid-main` (upstream order) | **Sometimes** | 1 positive witness: `lce=1 /\ tid=0` — the slot is owned by the new claimer yet carries no tag. |
+| `x86-release-tid-fixed` (shipped order) | **Never** | 0 positive witnesses out of 4. |
+
+This closes a gap in the existing matrix: hazard 3 previously had ARM rows only, so
+nothing said the ordering mattered on x86. It does, and not because of a fence —
+`Volatile.Write` compiles to a plain `MOV` here. The ordering comes from the pairing:
+the clear precedes the unpublish in P0's total store order, P1's claim RMW cannot
+succeed until the unpublish is visible, and P1's tag store cannot hoist above its own
+locked RMW.
+
+The three layers agree exactly: `tagged_upstream_fn_tso` VIOLATED in TLC,
+`x86-release-tid-main` Sometimes in herd7, 44 and 925 false negatives on two different
+x86 machines — and the corresponding fixed row clean in all three.
+
 ---
 
 ## 7. Conclusion
