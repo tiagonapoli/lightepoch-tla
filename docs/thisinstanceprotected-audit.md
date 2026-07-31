@@ -263,10 +263,16 @@ LE_RELEASE_ORDER=volatile dotnet run --project src/LightEpoch.TidLitmus -c Relea
 
 An overnight soak (`artifacts/tidlitmus-soak.ps1`) runs the same A/B on a 32-vCPU
 Intel Azure VM, sweeping slot spaces 1/2/4/8 and thread counts up to 4x the core
-count, and re-runs the control **every cycle** — a ten-hour clean run only means
-something if the harness could still catch the defect at hour ten. On that machine
-the control reports ~925 violations per 530 M rounds, so the detector is roughly 10x
-more sensitive there than on the dev box.
+count in both harness modes, and re-runs both controls **every cycle** — a ten-hour
+clean run only means something if the harness could still catch the defect at hour
+ten. Measured control sensitivity on that machine, per cycle:
+
+| Mode | Rounds | Violations | Rate |
+| --- | --- | --- | --- |
+| idiom | 905.3 M | 19,062,416 | 2.1% of rounds |
+| query | 523.8 M | 703 | 1.3 per million |
+
+At 2.1% per round, a defect of this shape cannot hide in a soak of this length.
 
 ### 6c. Architecture-level — `herd/jit-derived/litmus/x86-release-tid-{main,fixed}.litmus`
 
