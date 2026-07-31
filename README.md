@@ -1375,8 +1375,8 @@ than weakening it.
 
 `ThisInstanceProtected()` is `kInvalidIndex != entry && (*(tableAligned +
 entry)).threadId == Metadata.threadId` (`:272-276`). That second clause is doing
-real work, and not only in assertions — it gates control flow in
-`ThisInstanceProtectedAndSuspend` and `ResumeIfNeeded` (`:285`, `:355`).
+real work, and not only in assertions — it gates control flow in `TrySuspend`
+and `ResumeIfNotProtected` (`:285`, `:355`).
 `Metadata.Entries` is thread-static and indexed by `instanceId`, and `Dispose()`
 recycles an `instanceId` without first checking that the table is empty. A thread
 that holds a stale index for a disposed instance can therefore name a live slot
@@ -1392,6 +1392,72 @@ field costs nothing in a 64-byte padded struct, the honest recommendation is to
 leave it in place and treat it as a debug assertion rather than as ownership
 state — the CAS is what makes the algorithm correct, and `threadId` should no
 longer be described as though it were.
+
+### Keeping the field is not free either: what `TrySuspend` and `ResumeIfNotProtected` now rest on
+
+Leaving `threadId` in place does not leave it *unchanged*. Before the fix it was
+the claim word, so `slot.threadId == Metadata.threadId` was an exact ownership
+test by construction: no other thread could write that word while this thread
+held the slot, because the only way in was a CAS that this thread's own id
+blocked. After the fix it is a plain store that merely trails the claim, and its
+correctness has to be argued rather than assumed.
+
+`CasAnnounceProtectedQuery` makes that argument checkable. Unlike
+`CasAnnounceTwoReaders`, whose `ThreadIdIntact` is a predicate on the raw slot
+word evaluated only while the reader's own store buffer happens to be empty,
+here the thread actually *performs* the load — with store forwarding, as real
+hardware does — branches on it, and the invariants are stated over the
+consequence of that branch.
+
+A false positive turns out to be unreachable by construction: the query also
+tests the thread-private entry index, which `Release()` invalidates. Only the
+false negative is reachable, and the two APIs convert it into two different
+failures, both permanent:
+
+| API | on a false negative | cost |
+| --- | --- | --- |
+| `TrySuspend()` | returns `false`, does not suspend | the slot is never released; its announce pins `SafeToReclaimEpoch` and reclamation stops for the life of the process |
+| `ResumeIfNotProtected()` | returns `true`, calls `Resume()` → `Acquire()` while already protected | trips the `entry == kInvalidIndex` assert in Debug; in Release takes a *second* slot and overwrites `Metadata.Entries[instanceId]`, orphaning the first |
+
+Both are reachable independently — checking `NoLostSuspend` or `NoDoubleAcquire`
+alone violates — so these are results, not inferences from a wrong query.
+
+| `ReleaseOrder` | `tso` | `arm` |
+| --- | --- | --- |
+| `release` — the fix: clear the tag, then unpublish with a release store | HOLDS | HOLDS |
+| `plain` — fix's order, plain unpublish | HOLDS | VIOLATED |
+| `upstream` — unpublish first, clear the tag after | VIOLATED | VIOLATED |
+
+The `plain` row is the familiar fence axis, and it is why `Release()` uses
+`Volatile.Write` on ARM: TSO's FIFO drain already orders the pair, so only a
+StoreStore-relaxing model bites.
+
+The `upstream` row is the new one, and it is the one that matters for an
+x86-only change. It keeps the fix's CAS but leaves `Release()` in its upstream
+order — `localCurrentEpoch = 0` before `threadId = 0` — and *fails under plain
+TSO*, with no weak memory involved. Inverting those two stores is not a
+weak-memory nicety; on x86 it is load-bearing. The 19-state counterexample:
+
+```
+ R1  claim, publish threadId=11, critical section
+ R1  TrySuspend -> protected -> Release()
+ R1    localCurrentEpoch = 0        slot published free   <-- upstream order
+ R1    threadId = 0                 issued, still buffered
+ R2  CAS(localCurrentEpoch, 0 -> e) succeeds -- claims the slot
+ R2  threadId = 22                  buffered, then drains
+ R1  threadId = 0                   drains LATE, wipes R2's tag
+ R2  ThisInstanceProtected() -> reads 0 != 22 -> false
+ R2  TrySuspend() -> returns false while genuinely protected
+```
+
+`R2` still owns the slot, so its announce stays in the table forever. Note this
+needs no reordering at all: `R1`'s clear is *issued* after the slot is already
+free, so program order alone is enough to lose the race.
+
+The practical consequence is that the ordering in `Release()` is not
+interchangeable with upstream's, and a reviewer reading the x86-minimal diff
+should treat those two lines as part of the fix rather than as incidental
+rearrangement.
 
 
 ## Other ordering defects in the same class
