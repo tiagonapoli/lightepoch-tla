@@ -311,6 +311,10 @@ row clean in all three layers.
   per round, but this was not exhaustively verified.
 - **`ToString()` and `ThreadIdAt()`** can observe a transiently stale tag. Both are
   diagnostics; neither is under test.
+- **User words** share the `Entry` cache line and inherit across a slot handoff, so
+  they depend on the same handover this change rewrites. Analysed separately in
+  [`userword-impact.md`](userword-impact.md): unaffected on x86, and the change closes
+  two pre-existing ARM holes there.
 
 ---
 

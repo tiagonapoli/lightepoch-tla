@@ -1,0 +1,23 @@
+AArch64 arm64-userword-handoff-fixed
+(* Same protocol and same condition as arm64-userword-handoff-main; the only
+   change is which field hands the slot over, and how.
+
+   Under the fix, localCurrentEpoch is the ownership word and Release()
+   unpublishes it with a release store (Volatile.Write), AFTER clearing
+   threadId. That release store is ordered after every preceding memory
+   operation of the departing thread -- including its EndInflightEnqueue write
+   of the InflightInactive sentinel into its user word. The arriving owner's
+   claim CAS reads-from that release store, so it acquires everything ordered
+   before it.
+
+   The user-word column was never part of the fix's design and is untouched by
+   the diff, but the handoff it depends on is exactly the pairing the fix
+   establishes. Upstream had no such pairing: the same message-passing shape
+   with a plain handover store is architecturally open. *)
+{ 0:X0=uw; 0:X1=tid; 0:X2=lce; 1:X0=lce; 1:X1=uw; uw=7; tid=3; lce=5; }
+ P0            | P1               ;
+ MOV X3,#9     | MOV X2,#0        ;
+ STR X3,[X0]   | MOV X3,#1        ;
+ STR XZR,[X1]  | CASAL X2,X3,[X0] ;
+ STLR XZR,[X2] | LDR X4,[X1]      ;
+exists (1:X2=0 /\ 1:X4=7)

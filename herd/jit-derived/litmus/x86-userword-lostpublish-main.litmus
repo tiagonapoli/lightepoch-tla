@@ -1,0 +1,19 @@
+X86 x86-userword-lostpublish-main
+(* The lost-publish direction on x86, under upstream's protocol -- the row that
+   answers "can this bite us on x86?".
+
+   No. The departing owner's three stores leave the store buffer in program
+   order, so its sentinel write precedes the handover store; the arriving owner
+   cannot claim until the handover store is visible; and its own publish is
+   therefore later in the total store order. TSO supplies for free the ordering
+   that the release store has to supply on ARM.
+
+   Expected Never, and the fixed counterpart is Never for the same reason, so
+   there is nothing for the change to regress here. See the arm64 pair for the
+   architecture where it does matter. *)
+{ uw=7; tid=3; lce=5; }
+ P0           | P1              ;
+ MOV [uw],$9  | MOV EDX,$1      ;
+ MOV [lce],$0 | XCHG [tid],EDX  ;
+ MOV [tid],$0 | MOV [uw],$8     ;
+exists (1:EDX=0 /\ uw=9)
