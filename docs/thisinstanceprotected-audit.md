@@ -228,6 +228,26 @@ question — old and new code agree, so the change is behavior-preserving for
 A run whose control stays silent exits `INCONCLUSIVE` (3) rather than `PASS`, because
 a detector that cannot fire proves nothing.
 
+**Idiom mode** (`--idiom`) replaces the direct query with the two production idioms
+from §3b, scored by what each would actually cost rather than by which bit came back:
+
+| Arm | Rounds | Violations | Rate |
+| --- | --- | --- | --- |
+| `upstream` (control) | 373.9 M | **79,294** | 212 per million |
+| `volatile` (**the fix**) | 996.8 M | **0** | — |
+
+At the control's rate the fix's exposure would have produced ~211,000 violations.
+It produced none. The control's output names both production failure modes directly:
+
+```
+thread 0:  idiom A would block on I/O while announcing epoch 1 in slot 2
+thread 31: idiom B would double-acquire and orphan slot 1
+```
+
+This is the sharpest instrument of the three, because the query is read immediately
+after `Resume()` — exactly where the call sites read it, and before the arriving
+owner's own tag store has drained far enough to hide a late-landing clear.
+
 ```
 # control (must report violations)
 LE_RELEASE_ORDER=upstream dotnet run --project src/LightEpoch.TidLitmus -c Release -- \
@@ -236,6 +256,9 @@ LE_RELEASE_ORDER=upstream dotnet run --project src/LightEpoch.TidLitmus -c Relea
 # the fix
 LE_RELEASE_ORDER=volatile dotnet run --project src/LightEpoch.TidLitmus -c Release -- \
     --seconds 60 --slots 2
+
+# either arm, driving the production call-site idioms instead of the raw query
+... --idiom
 ```
 
 An overnight soak (`artifacts/tidlitmus-soak.ps1`) runs the same A/B on a 32-vCPU
@@ -265,12 +288,27 @@ succeed until the unpublish is visible, and P1's tag store cannot hoist above it
 locked RMW.
 
 The three layers agree exactly: `tagged_upstream_fn_tso` VIOLATED in TLC,
-`x86-release-tid-main` Sometimes in herd7, 44 and 925 false negatives on two different
-x86 machines — and the corresponding fixed row clean in all three.
+`x86-release-tid-main` Sometimes in herd7, and 44 / 925 / 79,294 false negatives on
+two different x86 machines across three harness modes — with the corresponding fixed
+row clean in all three layers.
 
 ---
 
-## 7. Conclusion
+## 7. What is *not* covered
+
+- **ARM is a control here, not a conclusion.** `tagged_release_arm` holds and the ARM
+  herd7 rows pass, but no ARM soak was run for this question.
+- **`indexonly` is not a shipped configuration.** It is checked only in TLC, to
+  establish that `threadId` must survive the removal of its CAS.
+- **The `StoreBuffer.tla` coherence defect** was fixed locally in the new module. Other
+  specs are believed unaffected because they write each field at most once per thread
+  per round, but this was not exhaustively verified.
+- **`ToString()` and `ThreadIdAt()`** can observe a transiently stale tag. Both are
+  diagnostics; neither is under test.
+
+---
+
+## 8. Conclusion
 
 `threadId` is demoted from claim token to derived state, but it remains **required**:
 it is the only thing that distinguishes a claimed slot from one this thread is merely

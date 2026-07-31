@@ -57,7 +57,7 @@ namespace LightEpoch.TidLitmus
             Console.WriteLine($"  threads        : {cfg.Threads}");
             Console.WriteLine($"  slot space     : {cfg.Slots}");
             Console.WriteLine($"  duration       : {cfg.Seconds}s");
-            Console.WriteLine($"  samples/region : {cfg.Samples}");
+            Console.WriteLine($"  mode           : {(cfg.Idiom ? "production call-site idioms" : $"direct query, {cfg.Samples} samples/region")}");
             Console.WriteLine($"  expectation    : {(cfg.ExpectViolation ? "VIOLATION (forced-failure control)" : "clean")}");
             Console.WriteLine();
 
@@ -79,6 +79,7 @@ namespace LightEpoch.TidLitmus
             Console.WriteLine("  --slots <n>                    slot-table size forced via TestSlotSpace (default 2)");
             Console.WriteLine("  --seconds <n>                  wall-clock duration (default 30)");
             Console.WriteLine("  --samples <n>                  ThisInstanceProtected() samples per protected region (default 8)");
+            Console.WriteLine("  --idiom                        exercise the two production call-site idioms instead");
             Console.WriteLine("  --expect-violation             control arm: exit PASS only if violations are seen");
             Console.WriteLine("  --json <path>                  write a machine-readable report");
             Console.WriteLine();
@@ -95,6 +96,7 @@ namespace LightEpoch.TidLitmus
             public ushort Slots = 2;
             public int Seconds = 30;
             public int Samples = 8;
+            public bool Idiom;
             public bool ExpectViolation;
             public string Json;
 
@@ -114,6 +116,7 @@ namespace LightEpoch.TidLitmus
                         case "--slots": Slots = ushort.Parse(Next(), CultureInfo.InvariantCulture); break;
                         case "--seconds": Seconds = int.Parse(Next(), CultureInfo.InvariantCulture); break;
                         case "--samples": Samples = int.Parse(Next(), CultureInfo.InvariantCulture); break;
+                        case "--idiom": Idiom = true; break;
                         case "--expect-violation": ExpectViolation = true; break;
                         case "--json": Json = Next(); break;
                         default: error = $"unrecognised argument '{a}'"; return false;
@@ -278,6 +281,13 @@ namespace LightEpoch.TidLitmus
 
             while (Volatile.Read(ref stop[0]) == 0)
             {
+                if (cfg.Idiom)
+                {
+                    Idioms(ops, id, ref c, samples, samplesLock);
+                    c.Rounds++;
+                    continue;
+                }
+
                 ops.Resume();
 
                 // Ground truth. Both are thread-private: the entry index lives in this thread's
@@ -323,6 +333,58 @@ namespace LightEpoch.TidLitmus
 
                 c.Rounds++;
             }
+        }
+
+        /// <summary>
+        /// The two idioms the ~25 load-bearing Garnet call sites are written in, reproduced against
+        /// the same query and scored by what each would actually cost in production rather than by
+        /// whether the query returned the expected bit.
+        /// </summary>
+        private static void Idioms<TOps>(TOps ops, int id, ref Counters c, List<string> samples, object samplesLock)
+            where TOps : struct, IEpochOps
+        {
+            // Idiom A: suspend around a blocking wait.
+            //   StorageDeviceBase.cs:224-235, 295-306, 339-350; AllocatorBase.cs:355
+            // A false negative here means the thread blocks on I/O while still announcing an
+            // epoch, pinning SafeToReclaimEpoch for the duration of the wait.
+            ops.Resume();
+            bool isProtected = ops.ThisInstanceProtected;
+            if (!isProtected)
+            {
+                c.FalseNegatives++;
+                Record(samples, samplesLock, $"thread {id}: idiom A would block on I/O while announcing epoch {ops.ThisThreadAnnouncedEpoch} in slot {ops.EntryIndex}");
+            }
+
+            if (isProtected)
+                ops.Suspend();
+
+            Thread.SpinWait(64);      // stands in for the blocking wait
+
+            if (ops.ThisInstanceProtected)
+            {
+                c.FalsePositives++;
+                Record(samples, samplesLock, $"thread {id}: idiom A still reads as protected after Suspend()");
+            }
+
+            if (isProtected)
+                ops.Resume();
+
+            ops.Suspend();
+
+            // Idiom B: acquire if not already held.
+            //   AllocatorBase.cs:981, 1018, 2382; StorageDeviceBase.cs:261;
+            //   ObjectAllocatorImpl.cs:652; LogAccessor.cs:131
+            // A false negative here means ResumeIfNotProtected() acquires a second slot while the
+            // first is still held, orphaning it to announce a stale epoch forever.
+            ops.Resume();
+            int held = ops.EntryIndex;
+            if (!ops.ThisInstanceProtected)
+            {
+                c.FalseNegatives++;
+                Record(samples, samplesLock, $"thread {id}: idiom B would double-acquire and orphan slot {held}");
+            }
+
+            ops.Suspend();
         }
 
         private static void Record(List<string> samples, object samplesLock, string message)
