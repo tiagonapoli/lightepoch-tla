@@ -22,7 +22,7 @@ param(
     [Parameter(Mandatory = $true)][string] $OutDir,
     [double] $Hours = 10,
     [int] $ControlSeconds = 180,
-    [int] $ArmSeconds = 420
+    [int] $ArmSeconds = 300
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,7 +31,7 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $csv = Join-Path $OutDir 'tidlitmus-soak.csv'
 if (-not (Test-Path $csv))
 {
-    Set-Content -Path $csv -Value 'utc,cycle,arm,releaseOrder,threads,slots,seconds,rounds,falseNegatives,falsePositives,lostOwnership,violations,exitCode'
+    Set-Content -Path $csv -Value 'utc,cycle,arm,mode,releaseOrder,threads,slots,seconds,rounds,falseNegatives,falsePositives,lostOwnership,violations,exitCode'
 }
 
 $cpus = [Environment]::ProcessorCount
@@ -47,20 +47,22 @@ $arms = @(
     @{ Slots = 8; Threads = $cpus * 4 }
 )
 
-function Invoke-Arm([string] $ReleaseOrder, [int] $Slots, [int] $Threads, [int] $Seconds, [bool] $ExpectViolation, [int] $Cycle, [string] $Label)
+function Invoke-Arm([string] $ReleaseOrder, [int] $Slots, [int] $Threads, [int] $Seconds, [bool] $ExpectViolation, [bool] $Idiom, [int] $Cycle, [string] $Label)
 {
-    $json = Join-Path $OutDir ("{0}-c{1:d3}-{2}-s{3}-t{4}.json" -f $Label, $Cycle, $ReleaseOrder, $Slots, $Threads)
+    $mode = if ($Idiom) { 'idiom' } else { 'query' }
+    $json = Join-Path $OutDir ("{0}-{1}-c{2:d3}-{3}-s{4}-t{5}.json" -f $Label, $mode, $Cycle, $ReleaseOrder, $Slots, $Threads)
     $env:LE_RELEASE_ORDER = $ReleaseOrder
 
     $argv = @('--impl', 'cas', '--seconds', $Seconds, '--slots', $Slots, '--threads', $Threads, '--json', $json)
     if ($ExpectViolation) { $argv += '--expect-violation' }
+    if ($Idiom) { $argv += '--idiom' }
 
     & $Exe @argv | Out-Null
     $exit = $LASTEXITCODE
 
     $r = if (Test-Path $json) { Get-Content $json -Raw | ConvertFrom-Json } else { $null }
-    $row = '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12}' -f `
-        (Get-Date -Format o), $Cycle, $Label, $ReleaseOrder, $Threads, $Slots, $Seconds, `
+    $row = '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13}' -f `
+        (Get-Date -Format o), $Cycle, $Label, $mode, $ReleaseOrder, $Threads, $Slots, $Seconds, `
         $(if ($r) { $r.rounds } else { -1 }), `
         $(if ($r) { $r.falseNegatives } else { -1 }), `
         $(if ($r) { $r.falsePositives } else { -1 }), `
@@ -78,13 +80,17 @@ while ((Get-Date) -lt $deadline)
     $cycle++
 
     # Prove the detector is live for this cycle before trusting this cycle's clean runs.
-    Invoke-Arm -ReleaseOrder 'upstream' -Slots 2 -Threads ($cpus * 2) -Seconds $ControlSeconds -ExpectViolation $true -Cycle $cycle -Label 'control'
+    # Both modes, because they fail at different rates and for slightly different reasons:
+    # idiom reads the query immediately after Resume(), query mode samples across the region.
+    Invoke-Arm -ReleaseOrder 'upstream' -Slots 2 -Threads ($cpus * 2) -Seconds $ControlSeconds -ExpectViolation $true -Idiom $true -Cycle $cycle -Label 'control'
+    Invoke-Arm -ReleaseOrder 'upstream' -Slots 2 -Threads ($cpus * 2) -Seconds $ControlSeconds -ExpectViolation $true -Idiom $false -Cycle $cycle -Label 'control'
 
     foreach ($a in $arms)
     {
         if ((Get-Date) -ge $deadline) { break }
 
-        Invoke-Arm -ReleaseOrder 'volatile' -Slots $a.Slots -Threads $a.Threads -Seconds $ArmSeconds -ExpectViolation $false -Cycle $cycle -Label 'fix'
+        Invoke-Arm -ReleaseOrder 'volatile' -Slots $a.Slots -Threads $a.Threads -Seconds $ArmSeconds -ExpectViolation $false -Idiom $true -Cycle $cycle -Label 'fix'
+        Invoke-Arm -ReleaseOrder 'volatile' -Slots $a.Slots -Threads $a.Threads -Seconds $ArmSeconds -ExpectViolation $false -Idiom $false -Cycle $cycle -Label 'fix'
     }
 }
 
