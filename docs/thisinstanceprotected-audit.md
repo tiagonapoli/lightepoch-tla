@@ -274,6 +274,43 @@ ten. Measured control sensitivity on that machine, per cycle:
 
 At 2.1% per round, a defect of this shape cannot hide in a soak of this length.
 
+#### Soak result — 10 h, `x86-soak` (Standard_F32s_v2, 32 vCPU Intel), 2026-07-31
+
+11 cycles, 08:19–18:23 UTC, 130 rows:
+
+| Arm | Release order | Rows | Rounds | Violations |
+| --- | --- | --- | --- | --- |
+| fix, idiom | `volatile` | 54 | 96,943,010,041 | **0** |
+| fix, query | `volatile` | 54 | 48,331,862,462 | **0** |
+| control, idiom | `upstream` | 11 | 9,975,056,561 | 213,121,005 |
+| control, query | `upstream` | 11 | 6,059,080,623 | 8,303 |
+
+**145.3 billion rounds on the fix, zero violations** — no false negatives, and also zero
+false positives and zero lost-ownership events, so the query never went wrong in the
+other direction either. Every process exited 0.
+
+The number that makes those zeros mean something is the control column: **all 22
+control rows reported violations**, so there is no cycle whose clean rows are backed by
+a detector that had quietly gone blind. The controls also stayed stable across the ten
+hours — the last cycle's idiom control reported 19.7 M violations against the first
+cycle's 19.1 M — so sensitivity did not decay.
+
+Coverage was spread across the slot/thread space rather than concentrated at one point:
+
+| threads / slots | Rows | Fix rounds |
+| --- | --- | --- |
+| 32 / 1 | 22 | 26.7 B |
+| 32 / 2 | 22 | 27.1 B |
+| 64 / 2 | 22 | 27.8 B |
+| 64 / 4 | 22 | 31.1 B |
+| 128 / 8 | 20 | 32.6 B |
+
+The 1-slot configurations are the important ones for this question: with a single
+entry, every `Acquire()` contends for the same slot the previous owner just released,
+so the handoff window the tag race lives in is hit on essentially every round.
+
+Raw data: `tidlitmus-soak.csv` on the VM (deallocated after the run).
+
 ### 6c. Architecture-level — `herd/jit-derived/litmus/x86-release-tid-{main,fixed}.litmus`
 
 The hardware A/B says the fix survives on the silicon in front of us. herd7 says the
@@ -324,6 +361,7 @@ row clean in all three layers.
 it is the only thing that distinguishes a claimed slot from one this thread is merely
 probing, and removing it turns the probe window into a false positive (`indexonly_tso`).
 Kept, and combined with the inverted `Release()` order, the query's contract is
-unchanged in both directions — verified by model checking on x86-TSO and by an
-A/B on x86 silicon whose forced-failure control demonstrably detects the defect the
-fix avoids.
+unchanged in both directions — verified by model checking on x86-TSO, by herd7 against
+the emitted machine code, and by a 10-hour A/B on x86 silicon that put **145.3 billion
+rounds** through the fix without a single violation while its forced-failure control
+reported 213 million.
