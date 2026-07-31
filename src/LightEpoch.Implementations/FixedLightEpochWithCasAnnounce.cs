@@ -209,8 +209,19 @@ namespace LightEpoch.Core
         /// Mode 2 (<c>plain</c>) reproduces the production spelling — an ordinary store — and exists
         /// purely as the measurement baseline that modes 0 and 1 are priced against.
         /// </para>
+        /// <para>
+        /// Mode 3 (<c>upstream</c>) keeps the fix's claim CAS but restores upstream's Release()
+        /// ORDER: publish the slot free first, clear <c>threadId</c> after. It is not a candidate
+        /// fix — it is the forced-failure control for the <c>ThisInstanceProtected()</c> torture
+        /// harness. Once the slot reads free the next owner may claim it and write its own tag,
+        /// and this thread's trailing clear then lands on top of that tag, so the new owner's own
+        /// query answers "not protected" while it holds the slot. That is the false negative
+        /// <c>CasAnnounceProtectedQueryProbe_tagged_upstream_fn_tso</c> reports, and it needs no
+        /// weak memory: on x86 the release store is an ordinary <c>mov</c>, so the pair leaves the
+        /// store buffer in FIFO order and the free is visible while the clear is still pending.
+        /// </para>
         /// </summary>
-        static readonly string[] ReleaseOrderNames = ["volatile", "exchange", "plain"];
+        static readonly string[] ReleaseOrderNames = ["volatile", "exchange", "plain", "upstream"];
 
         internal static readonly int TestReleaseOrder = ParseReleaseOrder(Environment.GetEnvironmentVariable("LE_RELEASE_ORDER"));
 
@@ -799,7 +810,8 @@ namespace LightEpoch.Core
                 "Trying to release unprotected epoch. Make sure you do not re-enter Tsavorite from callbacks or IDevice implementations. If using tasks, use TaskCreationOptions.RunContinuationsAsynchronously.");
 
             // Clear "ThisInstanceProtected()" (non-static epoch table)
-            (*(tableAligned + entry)).threadId = 0;
+            if (TestReleaseOrder != 3)
+                (*(tableAligned + entry)).threadId = 0;
 
             // localCurrentEpoch is the slot-ownership word, so this store is what publishes the
             // slot as free. It must be a release store: if it were reordered ahead of the
@@ -809,8 +821,16 @@ namespace LightEpoch.Core
                 Volatile.Write(ref (*(tableAligned + entry)).localCurrentEpoch, 0);
             else if (TestReleaseOrder == 1)
                 _ = Interlocked.Exchange(ref (*(tableAligned + entry)).localCurrentEpoch, 0);
-            else
+            else if (TestReleaseOrder == 2)
                 (*(tableAligned + entry)).localCurrentEpoch = 0;
+            else
+            {
+                // Upstream's order, kept together with the fix's claim CAS. The forced-failure
+                // control: the slot is published free with the clear still to come, so the next
+                // owner can claim, tag the slot, and have this store wipe the tag underneath it.
+                Volatile.Write(ref (*(tableAligned + entry)).localCurrentEpoch, 0);
+                (*(tableAligned + entry)).threadId = 0;
+            }
 
             entry = kInvalidIndex;
             if (waiterCount > 0)

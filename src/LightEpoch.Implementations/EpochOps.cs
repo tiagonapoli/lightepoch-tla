@@ -23,6 +23,13 @@ namespace LightEpoch.Core
         /// <summary>Epoch this thread currently announces, for the tripwire diagnostic.</summary>
         public long ThisThreadAnnouncedEpoch { get; }
 
+        /// <summary>
+        /// The public protection query, <c>ThisInstanceProtected()</c>. Exposed so a harness can
+        /// compare its answer against ground truth (<see cref="EntryIndex"/> and
+        /// <see cref="ThisThreadAnnouncedEpoch"/>) while slots are being handed between threads.
+        /// </summary>
+        public bool ThisInstanceProtected { get; }
+
         /// <summary>Global epoch counter, for the tripwire diagnostic.</summary>
         public long CurrentEpoch { get; }
 
@@ -43,6 +50,7 @@ namespace LightEpoch.Core
         public long ReadAllEntries() => e.ReadAllEntries();
         public string Name => "baseline (LightEpoch, no fence)";
         public long ThisThreadAnnouncedEpoch => e.ThisThreadAnnouncedEpoch();
+        public bool ThisInstanceProtected => e.ThisInstanceProtected();
         public long CurrentEpoch => e.CurrentEpoch;
         public long SafeToReclaimEpoch => e.SafeToReclaimEpoch;
     }
@@ -60,6 +68,7 @@ namespace LightEpoch.Core
         public long ReadAllEntries() => e.ReadAllEntries();
         public string Name => "full-barrier (FixedLightEpochWithMemoryBarrier)";
         public long ThisThreadAnnouncedEpoch => e.ThisThreadAnnouncedEpoch();
+        public bool ThisInstanceProtected => e.ThisInstanceProtected();
         public long CurrentEpoch => e.CurrentEpoch;
         public long SafeToReclaimEpoch => e.SafeToReclaimEpoch;
     }
@@ -77,6 +86,7 @@ namespace LightEpoch.Core
         public long ReadAllEntries() => e.ReadAllEntries();
         public string Name => "cas-announce (FixedLightEpochWithCasAnnounce)";
         public long ThisThreadAnnouncedEpoch => e.ThisThreadAnnouncedEpoch();
+        public bool ThisInstanceProtected => e.ThisInstanceProtected();
         public long CurrentEpoch => e.CurrentEpoch;
         public long SafeToReclaimEpoch => e.SafeToReclaimEpoch;
     }
