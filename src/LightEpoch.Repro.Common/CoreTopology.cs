@@ -45,6 +45,92 @@ namespace LightEpoch.Repro.Common
         /// </summary>
         public static IReadOnlyList<PhysicalCore> Enumerate()
         {
+            return OperatingSystem.IsWindows() ? EnumerateWindows() : EnumerateLinux();
+        }
+
+        /// <summary>
+        /// Linux topology from sysfs. <c>thread_siblings_list</c> is the authoritative
+        /// SMT grouping — cores that share it share a store buffer, which is exactly the
+        /// pairing the litmus must avoid.
+        /// </summary>
+        private static IReadOnlyList<PhysicalCore> EnumerateLinux()
+        {
+            const string cpuRoot = "/sys/devices/system/cpu";
+            var seenSiblingGroups = new HashSet<string>();
+            var cores = new List<PhysicalCore>();
+
+            for (int cpu = 0; cpu < 4096; cpu++)
+            {
+                string cpuDirectory = $"{cpuRoot}/cpu{cpu}";
+                if (!System.IO.Directory.Exists(cpuDirectory))
+                    continue;
+
+                string siblingsPath = $"{cpuDirectory}/topology/thread_siblings_list";
+                int[] logicalProcessors;
+                if (System.IO.File.Exists(siblingsPath))
+                {
+                    string siblings = System.IO.File.ReadAllText(siblingsPath).Trim();
+                    if (!seenSiblingGroups.Add(siblings))
+                        continue;
+
+                    logicalProcessors = ParseCpuList(siblings);
+                }
+                else
+                {
+                    // No topology exposed (some VMs): treat every CPU as its own physical core.
+                    logicalProcessors = new[] { cpu };
+                }
+
+                if (logicalProcessors.Length == 0)
+                    continue;
+
+                cores.Add(new PhysicalCore(logicalProcessors[0], logicalProcessors, 0, NumaNodeOfLinuxCpu(cpuDirectory)));
+            }
+
+            if (cores.Count == 0)
+                throw new InvalidOperationException($"Could not enumerate physical cores from {cpuRoot}.");
+
+            return cores;
+        }
+
+        private static int NumaNodeOfLinuxCpu(string cpuDirectory)
+        {
+            foreach (var entry in System.IO.Directory.GetDirectories(cpuDirectory, "node*"))
+            {
+                string name = System.IO.Path.GetFileName(entry);
+                if (int.TryParse(name.AsSpan(4), out int node))
+                    return node;
+            }
+
+            return 0;
+        }
+
+        /// <summary>Parses a Linux sysfs cpu list such as "0-3,8", used for sibling and node masks.</summary>
+        private static int[] ParseCpuList(string list)
+        {
+            var result = new List<int>();
+            foreach (var part in list.Split(',', StringSplitOptions.RemoveEmptyEntries))
+            {
+                int dash = part.IndexOf('-');
+                if (dash < 0)
+                {
+                    if (int.TryParse(part, out int single))
+                        result.Add(single);
+                    continue;
+                }
+
+                if (int.TryParse(part.AsSpan(0, dash), out int low) && int.TryParse(part.AsSpan(dash + 1), out int high))
+                {
+                    for (int i = low; i <= high; i++)
+                        result.Add(i);
+                }
+            }
+
+            return result.ToArray();
+        }
+
+        private static IReadOnlyList<PhysicalCore> EnumerateWindows()
+        {
             var numaByLogicalProcessor = NumaNodesByLogicalProcessor();
             var cores = new List<PhysicalCore>();
             uint length = 0;

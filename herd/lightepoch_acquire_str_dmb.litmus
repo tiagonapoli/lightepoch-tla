@@ -1,0 +1,21 @@
+AArch64 LightEpoch-acquire-str-dmb
+{
+currentEpoch=1;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=currentEpoch; 0:X1=readerSlot; 0:X2=objectUnlinked;
+1:X0=objectUnlinked; 1:X1=currentEpoch; 1:X2=readerSlot; 1:X3=objectFreed;
+}
+ P0                 | P1                 ;
+ LDR W4,[X0]        | MOV W4,#1          ;
+ STR W4,[X1]        | STR W4,[X0]        ;
+ DMB ISH            | LDADDAL W4,W5,[X1] ;
+ LDR W5,[X2]        | LDR W6,[X2]        ;
+                    | CBZ W6,free        ;
+                    | B done             ;
+                    | free:              ;
+                    | STR W4,[X3]        ;
+                    | done:              ;
+
+exists (0:X4=1 /\ 0:X5=0 /\ 1:X6=0 /\ objectFreed=1)

@@ -1,0 +1,23 @@
+AArch64 LightEpoch-composed-casal-ldar
+{
+currentEpoch=1;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=currentEpoch; 0:X1=readerSlot; 0:X2=objectUnlinked;
+1:X0=objectUnlinked; 1:X1=currentEpoch; 1:X2=readerSlot; 1:X3=objectFreed;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | MOV W4,#1          ;
+ MOV W8,#0          | STR W4,[X0]        ;
+ CASAL W8,W4,[X1]   | LDADDAL W4,W5,[X1] ;
+ LDAR W5,[X0]       | LDR W7,[X2]        ;
+ STR W5,[X1]        | CBZ W7,free        ;
+ LDR W6,[X2]        | CMP W7,#1          ;
+                    | B.GT free          ;
+                    | B done             ;
+                    | free:              ;
+                    | STR W4,[X3]        ;
+                    | done:              ;
+
+exists (0:X8=0 /\ 0:X6=0 /\ objectFreed=1)

@@ -1,0 +1,3 @@
+$done='C:\le\artifacts\x86-vm-d32-20260728\DONE.txt'
+if(Test-Path $done){ Write-Host DONE; Get-Content $done; if(Test-Path C:\le\artifacts\x86-vm-d32-20260728\results.csv){ Import-Csv C:\le\artifacts\x86-vm-d32-20260728\results.csv | Select-Object name,status,exitCode,wallSeconds,reportedSeconds,violations,sampledRounds,slotReuse | Format-Table -AutoSize } } else { Write-Host RUNNING; Get-Process powershell -ErrorAction SilentlyContinue | Select-Object Id,CPU,StartTime,Path | Format-Table -AutoSize; if(Test-Path C:\le\artifacts\x86-vm-d32-20260728\results.csv){ Import-Csv C:\le\artifacts\x86-vm-d32-20260728\results.csv | Select-Object -Last 5 name,status,wallSeconds | Format-Table -AutoSize } }
+

@@ -1,0 +1,17 @@
+X86 x86-userword-handoff-main
+(* The user-word handoff under upstream's protocol, on x86.
+
+   Companion to arm64-userword-handoff-main: same protocol, same condition,
+   different architecture. This row exists to answer "does the change affect
+   the user-word feature on x86?" rather than to demonstrate a hazard.
+
+   x86-TSO does not reorder store-store, so the departing owner's user-word
+   write cannot sink past the plain store that hands the slot over, and the
+   claimer cannot observe the stale in-flight value. Expected Never -- upstream
+   was already safe here. *)
+{ uw=7; tid=3; lce=5; }
+ P0           | P1              ;
+ MOV [uw],$9  | MOV EDX,$1      ;
+ MOV [lce],$0 | XCHG [tid],EDX  ;
+ MOV [tid],$0 | MOV EAX,[uw]    ;
+exists (1:EDX=0 /\ 1:EAX=7)

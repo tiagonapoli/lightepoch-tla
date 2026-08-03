@@ -1,0 +1,23 @@
+AArch64 LightEpoch-refresh-ldar-relaxed-rmw
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                | P1                 ;
+ MOV W4,#1         | LDAR W4,[X0]       ;
+ STR W4,[X0]       | STR W4,[X1]        ;
+ LDADD W4,W5,[X1]  | LDR W5,[X2]        ;
+ LDR W6,[X2]       |                    ;
+ CBZ W6,free       |                    ;
+ CMP W6,#0         |                    ;
+ B.GT free         |                    ;
+ B done            |                    ;
+ free:             |                    ;
+ STR W4,[X3]       |                    ;
+ done:             |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)

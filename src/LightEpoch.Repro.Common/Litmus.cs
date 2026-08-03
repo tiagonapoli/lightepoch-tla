@@ -41,7 +41,32 @@ namespace LightEpoch.Repro.Common
         private int endCount;
         private int endSense;
         private long sink;
+        private long frees;
         private volatile bool stop;
+
+        /// <summary>
+        /// Tripwire (LE_TRIPWIRE=1). The page the reader is dereferencing right now, or 0.
+        /// The reclaimer samples this at the instant it frees a page: seeing its own page here
+        /// proves a live reader was inside that page when it was released, which is the
+        /// use-after-free condition itself rather than a segfault that merely implies it.
+        /// <para>
+        /// This matters because a crash is weak evidence. It can be missed entirely when the
+        /// address stays mapped, and it says nothing about WHY the free was authorised. The
+        /// tripwire also captures the epoch state at the moment of the free, so a hit
+        /// distinguishes a genuine epoch-protocol violation from a defect in this harness.
+        /// </para>
+        /// Deliberately plain loads and stores: making them interlocked would add the very
+        /// ordering under test. Misses are therefore expected and acceptable; a HIT is proof.
+        /// </summary>
+        internal static readonly bool Tripwire = Environment.GetEnvironmentVariable("LE_TRIPWIRE") == "1";
+        internal static readonly bool TripwireSelfTest = Environment.GetEnvironmentVariable("LE_TRIPWIRE_SELFTEST") == "1";
+        private long readerActivePage;
+        private long readerActiveEpoch;
+        private long tripwireHits;
+        private long tripwireSelfTestHits;
+        private long firstHitTrigger = -1;
+        private long firstHitSafeToReclaim = -1;
+        private long firstHitReaderEpoch = -1;
 
         private readonly long rounds;
         private readonly int deref;
@@ -75,7 +100,7 @@ namespace LightEpoch.Repro.Common
             };
             reader.Start();
 
-            WindowsNative.Pin(reclaimerCore);
+            PlatformNative.Pin(reclaimerCore);
 
             var stopwatch = Stopwatch.StartNew();
             ReclaimerLoop();
@@ -83,7 +108,26 @@ namespace LightEpoch.Repro.Common
 
             stop = true;
             reader.Join(2000);
-            Console.WriteLine($"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s with NO fault. sink={Volatile.Read(ref sink)}");
+            if (Tripwire)
+            {
+                long hits = Volatile.Read(ref tripwireHits);
+                Console.WriteLine(hits == 0
+                    ? "tripwire: 0 hits (no reader was inside a page at the instant it was freed)"
+                    : $"tripwire: {hits:N0} HITS - freed a page a reader was dereferencing. "
+                      + $"first hit: readerEpoch={firstHitReaderEpoch} triggerEpoch={firstHitTrigger} safeToReclaimEpoch={firstHitSafeToReclaim}");
+            }
+
+            if (TripwireSelfTest)
+            {
+                long selfHits = Volatile.Read(ref tripwireSelfTestHits);
+                Console.WriteLine(selfHits == 0
+                    ? "tripwire self-test: 0 hits - THE DETECTOR IS BLIND, every '0 hits' verdict is void"
+                    : $"tripwire self-test: {selfHits:N0} hits - detector is live");
+            }
+            Console.WriteLine($"Completed {rounds:N0} rounds in {stopwatch.Elapsed.TotalSeconds:F1}s with NO fault. freedPages={Volatile.Read(ref frees):N0} sink={Volatile.Read(ref sink)}");
+            if (Volatile.Read(ref frees) == 0)
+                Console.WriteLine("WARNING: nothing was ever reclaimed, so this run could not have faulted regardless of the epoch's correctness - the verdict is void");
+
             return 0;
         }
 
@@ -103,7 +147,7 @@ namespace LightEpoch.Repro.Common
 
         private void ReaderLoop()
         {
-            WindowsNative.Pin(readerCore);
+            PlatformNative.Pin(readerCore);
 
             for (long round = 0; round < rounds && !stop; round++)
             {
@@ -124,11 +168,20 @@ namespace LightEpoch.Repro.Common
             if (pageAddress == 0)
                 return;
 
+            if (Tripwire)
+            {
+                readerActiveEpoch = ops.ThisThreadAnnouncedEpoch;
+                readerActivePage = pageAddress;
+            }
+
             long* page = (long*)pageAddress;
             long accumulator = 0;
             for (int index = 0; index < deref; index++)
                 accumulator += page[index & 511];
             sink += accumulator;
+
+            if (Tripwire)
+                readerActivePage = 0;
         }
 
         // BumpCurrentEpoch asserts ThisInstanceProtected(), so the retiring thread holds
@@ -141,7 +194,7 @@ namespace LightEpoch.Repro.Common
 
             for (long round = 0; round < rounds; round++)
             {
-                byte* page = WindowsNative.Alloc(PageSize);
+                byte* page = PlatformNative.Alloc(PageSize);
                 for (int index = 0; index < 512; index++)
                     ((long*)page)[index] = index;
                 Volatile.Write(ref curPage, (long)page);
@@ -159,13 +212,70 @@ namespace LightEpoch.Repro.Common
 
                 curPage = 0;
                 long pageAddress = (long)page;
-                ops.BumpCurrentEpoch(() => WindowsNative.Free((byte*)pageAddress));
+                long triggerEpoch = ops.CurrentEpoch;
+
+                // Detector sensitivity control: sample the tripwire condition at the instant
+                // the page is retired rather than at the instant it is reclaimed. Nothing is
+                // freed early, so this measures only whether the detector can fire at all --
+                // a self-test run reporting 0 hits means the tripwire is blind and every
+                // "0 hits" verdict from a real run is void.
+                if (TripwireSelfTest && Volatile.Read(ref readerActivePage) == pageAddress)
+                {
+                    if (Interlocked.Increment(ref tripwireSelfTestHits) == 1)
+                    {
+                        Console.Error.WriteLine("TRIPWIRE SELF-TEST: first hit - detector is live on this machine");
+                        Console.Error.Flush();
+                    }
+                }
+
+                ops.BumpCurrentEpoch(() =>
+                {
+                    if (Tripwire && Volatile.Read(ref readerActivePage) == pageAddress)
+                    {
+                        if (Interlocked.Increment(ref tripwireHits) == 1)
+                        {
+                            firstHitTrigger = triggerEpoch;
+                            firstHitSafeToReclaim = ops.SafeToReclaimEpoch;
+                            firstHitReaderEpoch = Volatile.Read(ref readerActiveEpoch);
+
+                            // Report immediately and flush. The fault this hit predicts usually
+                            // kills the process microseconds later, so an end-of-run summary
+                            // would be lost exactly on the runs that matter most.
+                            Console.Error.WriteLine(
+                                $"TRIPWIRE HIT: freed a page a reader was dereferencing. "
+                                + $"readerEpoch={firstHitReaderEpoch} triggerEpoch={firstHitTrigger} "
+                                + $"safeToReclaimEpoch={firstHitSafeToReclaim}");
+                            Console.Error.Flush();
+                        }
+                    }
+                    PlatformNative.Free((byte*)pageAddress, PageSize);
+                    frees++;
+                });
                 ops.Refresh();
 
                 EndBarrier();
+
+                // A "survived" verdict is vacuous if the fix stopped reclaiming, and these runs
+                // are usually killed at a time cap so the end-of-run summary never prints.
+                // Emitting progress periodically makes the reclamation rate visible either way.
+                if ((round & 0xFFFF) == 0)
+                    MaybeReportProgress(round);
             }
 
             ops.Suspend();
+        }
+
+        private long lastProgressMs = Environment.TickCount64;
+
+        private void MaybeReportProgress(long round)
+        {
+            long now = Environment.TickCount64;
+            if (now - lastProgressMs < 10_000)
+                return;
+
+            lastProgressMs = now;
+            Console.WriteLine($"progress: rounds={round:N0} freedPages={frees:N0}");
+            Console.Out.Flush();
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

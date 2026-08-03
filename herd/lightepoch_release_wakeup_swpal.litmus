@@ -1,0 +1,23 @@
+AArch64 LightEpoch-release-wakeup-swpal
+(*
+ * U2 candidate fix A: publish the slot as free with an atomic exchange rather
+ * than a release store. SWPAL is a full-fence RMW, which supplies the StoreLoad
+ * ordering the release store cannot, so the lost wakeup should be forbidden.
+ *
+ * This is the zero-extra-instruction spelling: it replaces the release store
+ * rather than adding a barrier next to it.
+ *)
+{
+localCurrentEpoch=1;
+waiterCount=0;
+0:X0=localCurrentEpoch; 0:X1=waiterCount;
+1:X0=waiterCount; 1:X1=localCurrentEpoch;
+}
+ P0                 | P1                 ;
+ MOV W4,#0          | MOV W4,#1          ;
+ SWPAL W4,W6,[X0]   | LDADDAL W4,W5,[X0] ;
+ LDAR W5,[X1]       | MOV W6,#0          ;
+                    | MOV W7,#2          ;
+                    | CAS W6,W7,[X1]     ;
+
+exists (0:X5=0 /\ 1:X6=1)

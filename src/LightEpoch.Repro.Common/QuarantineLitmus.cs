@@ -87,7 +87,7 @@ namespace LightEpoch.Repro.Common
         {
             Console.WriteLine($"ops = {ops.Name}");
 
-            pool = WindowsNative.Alloc(PageSize * PoolPages);
+            pool = PlatformNative.Alloc(PageSize * PoolPages);
             for (int slot = 0; slot < PoolPages; slot++)
             {
                 long page = (long)(pool + ((nuint)slot * PageSize));
@@ -116,7 +116,7 @@ namespace LightEpoch.Repro.Common
                 disturbers[i].Start();
             }
 
-            WindowsNative.Pin(reclaimerCore);
+            PlatformNative.Pin(reclaimerCore);
 
             var stopwatch = Stopwatch.StartNew();
             ReclaimerLoop();
@@ -133,7 +133,7 @@ namespace LightEpoch.Repro.Common
                 // decile would mean the harness reaches some absorbing state and stops
                 // racing, which would make the totals meaningless.
                 string spread = string.Join(" ", violationDeciles);
-                Console.Error.WriteLine($"USE-AFTER-FREE: reader read a quarantined page while protected. violations={observed:N0} firstRound={Volatile.Read(ref firstViolationRound):N0} lastRound={Volatile.Read(ref lastViolationRound):N0} deciles=[{spread}] elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
+                Console.Error.WriteLine($"USE-AFTER-FREE: reader read a quarantined page while protected. violations={observed:N0} sampledRounds={sampled:N0} drains={Volatile.Read(ref drains):N0} quarantined={Volatile.Read(ref quarantines):N0} firstRound={Volatile.Read(ref firstViolationRound):N0} lastRound={Volatile.Read(ref lastViolationRound):N0} deciles=[{spread}] elapsed={stopwatch.Elapsed.TotalSeconds:F1}s");
                 return 1;
             }
 
@@ -146,7 +146,7 @@ namespace LightEpoch.Repro.Common
 
         private void DisturberLoop(int core)
         {
-            WindowsNative.Pin(core);
+            PlatformNative.Pin(core);
 
             long local = 0;
             while (!stop)
@@ -160,7 +160,7 @@ namespace LightEpoch.Repro.Common
 
         private void ReaderLoop()
         {
-            WindowsNative.Pin(readerCore);
+            PlatformNative.Pin(readerCore);
 
             for (long round = 0; round < rounds && !stop; round++)
             {

@@ -1,0 +1,21 @@
+X86 x86-release-tid-fixed
+(* Same protocol and same condition as x86-release-tid-main; the only change is
+   the order of P0's two stores, which is the order the fix ships.
+
+   Clearing the tag BEFORE publishing the slot free is what makes the tag safe
+   to write with a plain store. P0's clear precedes its unpublish in the total
+   store order; P1's claim RMW cannot succeed until that unpublish is visible,
+   so it is already ordered after the clear; and P1's tag store cannot hoist
+   above its own locked RMW. Per-location coherence then leaves P1's tag last.
+
+   Note this holds on x86 without any fence: the ordering comes from the
+   pairing, not from the release store, which is a plain MOV here. The
+   Volatile.Write in the C# is doing work only on weaker models -- see
+   arm64-release-plainstore for the ARM counterpart. What the two rows here
+   establish is that the store ORDER is load-bearing on x86 all by itself. *)
+{ lce=0; tid=0; }
+ P0            | P1                ;
+ MOV [tid],$0  | MOV EDX,$1        ;
+ MOV [lce],$0  | XCHG [lce],EDX    ;
+               | MOV [tid],$2      ;
+exists (lce=1 /\ tid=0)

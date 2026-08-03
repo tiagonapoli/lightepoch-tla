@@ -1,0 +1,18 @@
+X86 x86-userword-handoff-fixed
+(* The user-word handoff under the fix, on x86.
+
+   Paired with x86-userword-handoff-main, this is the row that answers the
+   question directly: both are Never, so on x86 the slot-claim change neither
+   helps nor harms the user-word feature. The ordering the user-word column
+   depends on was already supplied by TSO, and the fix does not take it away.
+
+   The difference between the two architectures is worth stating plainly. On
+   ARM the fix CLOSES a pre-existing hole (see the arm64 pair); on x86 there
+   was no hole and there is no regression. Either way the direction is never
+   worse. *)
+{ uw=7; tid=3; lce=5; }
+ P0           | P1              ;
+ MOV [uw],$9  | MOV EDX,$1      ;
+ MOV [tid],$0 | XCHG [lce],EDX  ;
+ MOV [lce],$0 | MOV EAX,[uw]    ;
+exists (1:EDX=0 /\ 1:EAX=7)

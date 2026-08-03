@@ -1,0 +1,1010 @@
+LightEpoch AArch64 herd7 results
+=================================
+Date: 2026-07-28
+Repository work directory: Q:\src\lightepoch-tla\herd
+
+Tooling / reproducibility
+-------------------------
+Native Windows: herd7 and opam were not already installed. WSL was available (Ubuntu-22.04, WSL2), but the WSL user did not have passwordless sudo, so apt-based opam installation could not be completed non-interactively. The GitHub herdtools7 7.58 release has no binary assets. I used a reproducible Docker-based opam install instead:
+
+  docker run --name lightepoch-herdtools-build ocaml/opam:debian-12-ocaml-5.2 sh -lc 'set -e; opam update -y >/dev/null; opam install -y herdtools7; eval $(opam env); herd7 -version'
+  docker commit lightepoch-herdtools-build lightepoch-herdtools:7.58
+  docker rm lightepoch-herdtools-build
+
+herd7 version:
+  7.58, Rev: exported
+
+Official AArch64 model used:
+  /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat
+
+Critical correction: faithful reclaimer
+---------------------------------------
+The five primary litmus files now model the reclaimer without standalone barriers:
+
+  STR objectUnlinked=1; LDADDAL currentEpoch; LDR readerSlot
+
+I used LDADDAL directly. herd7 accepted it, and the relaxed-RMW controls using LDADD produce different verdicts, so the model is distinguishing LDADDAL's acquire-release RMW semantics from a relaxed RMW.
+
+The previous stronger encoding with DMB ISH around LDADDAL was intentionally removed from every primary variant.
+
+Common condition
+----------------
+  exists (0:X4=1 /\ 0:X5=0 /\ 1:X6=1 /\ [objectFreed]=1)
+
+Primary table: faithful LDADDAL reclaimer
+-----------------------------------------
+All commands use:
+
+  docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat <file>'
+
+| Variant | File | Verdict | Observation |
+|---|---|---|---|
+| plain LDR epoch; STR announce; LDR unlink | lightepoch_plain.litmus | ALLOWED | Observation LightEpoch-plain Sometimes 1 7 |
+| plain LDR epoch; STLR announce; LDR unlink | lightepoch_stlr.litmus | ALLOWED | Observation LightEpoch-stlr Sometimes 1 7 |
+| plain LDR epoch; STR announce; DMB ISH; LDR unlink | lightepoch_str_dmb.litmus | FORBIDDEN | Observation LightEpoch-str-dmb Never 0 5 |
+| LDAR epoch; STR announce; LDR unlink | lightepoch_ldar.litmus | FORBIDDEN | Observation LightEpoch-ldar Never 0 6 |
+| plain LDR epoch; STR announce; DMB ISHLD; LDR unlink | lightepoch_ldr_ishld.litmus | FORBIDDEN | Observation LightEpoch-ldr-ishld Never 0 6 |
+
+Exact primary invocations and summaries
+---------------------------------------
+1. lightepoch_plain.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_plain.litmus'
+   Verdict: ALLOWED
+   Witnesses: Positive: 1 Negative: 7
+   Observation LightEpoch-plain Sometimes 1 7
+   Hash=14182d78e47210c477caff5c14c70fd3
+
+2. lightepoch_stlr.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_stlr.litmus'
+   Verdict: ALLOWED
+   Witnesses: Positive: 1 Negative: 7
+   Observation LightEpoch-stlr Sometimes 1 7
+   Hash=a962bb1b0c9949227ebbe313507d3a52
+
+3. lightepoch_str_dmb.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_str_dmb.litmus'
+   Verdict: FORBIDDEN
+   Witnesses: Positive: 0 Negative: 5
+   Observation LightEpoch-str-dmb Never 0 5
+   Hash=e4755fbe6c3016f09ce670df34bcd442
+
+4. lightepoch_ldar.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_ldar.litmus'
+   Verdict: FORBIDDEN
+   Witnesses: Positive: 0 Negative: 6
+   Observation LightEpoch-ldar Never 0 6
+   Hash=de5f95b1543c193d1160d0af8ce864ef
+
+5. lightepoch_ldr_ishld.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_ldr_ishld.litmus'
+   Verdict: FORBIDDEN
+   Witnesses: Positive: 0 Negative: 6
+   Observation LightEpoch-ldr-ishld Never 0 6
+   Hash=7350f9c2550a190e6b9f7c7c9c5b2707
+
+Sensitivity control: relaxed LDADD reclaimer
+--------------------------------------------
+These controls replace only the reclaimer RMW instruction:
+
+  STR objectUnlinked=1; LDADD currentEpoch; LDR readerSlot
+
+| Variant | File | Verdict | Observation |
+|---|---|---|---|
+| plain | lightepoch_plain_relaxed_rmw.litmus | ALLOWED | Observation LightEpoch-relaxed-rmw-plain Sometimes 1 7 |
+| STLR announce | lightepoch_stlr_relaxed_rmw.litmus | ALLOWED | Observation LightEpoch-relaxed-rmw-stlr Sometimes 1 7 |
+| STR+DMB ISH announce side | lightepoch_str_dmb_relaxed_rmw.litmus | ALLOWED | Observation LightEpoch-relaxed-rmw-str-dmb Sometimes 1 7 |
+| LDAR epoch | lightepoch_ldar_relaxed_rmw.litmus | ALLOWED | Observation LightEpoch-relaxed-rmw-ldar Sometimes 1 7 |
+| DMB ISHLD load side | lightepoch_ldr_ishld_relaxed_rmw.litmus | ALLOWED | Observation LightEpoch-relaxed-rmw-ldr-ishld Sometimes 1 7 |
+
+Relaxed-control exact invocations and summaries
+-----------------------------------------------
+All commands use the same docker/herd7 invocation template above, with the listed file name.
+
+- lightepoch_plain_relaxed_rmw.litmus: ALLOWED; Positive: 1 Negative: 7; Observation LightEpoch-relaxed-rmw-plain Sometimes 1 7; Hash=72ff51531b54199e2144c8d0dce55021
+- lightepoch_stlr_relaxed_rmw.litmus: ALLOWED; Positive: 1 Negative: 7; Observation LightEpoch-relaxed-rmw-stlr Sometimes 1 7; Hash=4d3cff00206d2e95b1715f8c089a8b00
+- lightepoch_str_dmb_relaxed_rmw.litmus: ALLOWED; Positive: 1 Negative: 7; Observation LightEpoch-relaxed-rmw-str-dmb Sometimes 1 7; Hash=139cbdaafa6a2a4236758b851b2098fd
+- lightepoch_ldar_relaxed_rmw.litmus: ALLOWED; Positive: 1 Negative: 7; Observation LightEpoch-relaxed-rmw-ldar Sometimes 1 7; Hash=a66213c66bcf540a47b3528603509a2a
+- lightepoch_ldr_ishld_relaxed_rmw.litmus: ALLOWED; Positive: 1 Negative: 7; Observation LightEpoch-relaxed-rmw-ldr-ishld Sometimes 1 7; Hash=12e826dfe66aa6107c4fe9d536237812
+
+Conclusion
+----------
+Baseline remains alive with the faithful defenced reclaimer: plain reader is ALLOWED. LDAR remains FORBIDDEN with LDADDAL and no standalone DMBs on the reclaimer. The MP reasoning is therefore still confirmed, but it depends on the reclaimer RMW being acquire-release: replacing LDADDAL with relaxed LDADD makes even LDAR and DMB ISHLD reader variants ALLOWED.
+
+Acquire-entry store-side hazard: minimality of announce ordering
+================================================================
+Date: 2026-07-28 late follow-up
+
+Purpose
+-------
+This section models the independent acquire-entry hazard where the reader's first announce store is not yet visible to the reclaimer:
+
+  Reader P0:     load currentEpoch -> e; announce readerSlot=e; load objectUnlinked -> u
+  Reclaimer P1:  STR objectUnlinked=1; LDADDAL currentEpoch; LDR readerSlot; if slot==0 free
+
+The primary condition is the buggy outcome where P0 announced a non-zero epoch value and read objectUnlinked==0, while P1 still read readerSlot==0 and stored objectFreed=1.
+
+Primary condition for rows 1, 2, and 4:
+  exists (0:X4=1 /\ 0:X5=0 /\ 1:X6=0 /\ [objectFreed]=1)
+
+Primary condition for CAS rows additionally requires the CAS read initial slot 0:
+  exists (0:X4=1 /\ 0:X5=0 /\ 0:X7=0 /\ 1:X6=0 /\ [objectFreed]=1)
+
+All primary commands use the faithful reclaimer with no standalone DMB:
+  STR objectUnlinked=1; LDADDAL currentEpoch; LDR readerSlot
+
+All commands use:
+  docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat <file>'
+
+Four requested rows
+-------------------
+| Row | Variant | File | Verdict | Observation |
+|---|---|---|---|---|
+| 1 | ACQUIRE-PLAIN: LDR epoch; STR announce; LDR unlink | lightepoch_acquire_plain.litmus | ALLOWED | Observation LightEpoch-acquire-plain Sometimes 1 7 |
+| 2 | ACQUIRE-LDAR-ONLY: LDAR epoch; STR announce; LDAR unlink | lightepoch_acquire_ldar_only.litmus | ALLOWED | Observation LightEpoch-acquire-ldar-only Sometimes 1 5 |
+| 3 | ACQUIRE-CAS: LDR epoch; CASAL announce; LDR unlink | lightepoch_acquire_casal.litmus | FORBIDDEN | Observation LightEpoch-acquire-casal Never 0 10 |
+| 4 | ACQUIRE-STLR: LDR epoch; STLR announce; LDR unlink | lightepoch_acquire_stlr.litmus | ALLOWED | Observation LightEpoch-acquire-stlr Sometimes 1 7 |
+
+Exact requested-row invocations and summaries
+---------------------------------------------
+1. lightepoch_acquire_plain.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_acquire_plain.litmus'
+   Verdict: ALLOWED
+   Witnesses: Positive: 1 Negative: 7
+   Observation LightEpoch-acquire-plain Sometimes 1 7
+   Hash=4e5ac40393c6e56066c0175314e0c17f
+
+2. lightepoch_acquire_ldar_only.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_acquire_ldar_only.litmus'
+   Verdict: ALLOWED
+   Witnesses: Positive: 1 Negative: 5
+   Observation LightEpoch-acquire-ldar-only Sometimes 1 5
+   Hash=694752d94c065a9598e4422e0da73f75
+   Note: this row is stronger than only LDAR(currentEpoch), because objectUnlinked is also read with LDAR. It is still ALLOWED, so acquire loads alone do not close this store-side hazard.
+
+3. lightepoch_acquire_casal.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_acquire_casal.litmus'
+   Verdict: FORBIDDEN
+   Witnesses: Positive: 0 Negative: 10
+   Observation LightEpoch-acquire-casal Never 0 10
+   Hash=b22797f6fc34131e4e13b376a2b46005
+
+4. lightepoch_acquire_stlr.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_acquire_stlr.litmus'
+   Verdict: ALLOWED
+   Witnesses: Positive: 1 Negative: 7
+   Observation LightEpoch-acquire-stlr Sometimes 1 7
+   Hash=a922956a739b0ea5b8a5cf52534d1b49
+
+Weakest CAS-family ordering checked
+-----------------------------------
+I used CASAL directly for the requested CAS row; herd7 accepted it. I then weakened only the reader-side CAS ordering:
+
+| Variant | File | Verdict | Observation |
+|---|---|---|---|
+| CAS relaxed | lightepoch_acquire_cas.litmus | ALLOWED | Observation LightEpoch-acquire-cas Sometimes 2 14 |
+| CASA acquire-only | lightepoch_acquire_casa.litmus | ALLOWED | Observation LightEpoch-acquire-casa Sometimes 2 14 |
+| CASL release-only | lightepoch_acquire_casl.litmus | ALLOWED | Observation LightEpoch-acquire-casl Sometimes 2 14 |
+| CASAL acquire-release | lightepoch_acquire_casal.litmus | FORBIDDEN | Observation LightEpoch-acquire-casal Never 0 10 |
+
+Exact weakened-CAS invocations and summaries
+--------------------------------------------
+- lightepoch_acquire_cas.litmus: ALLOWED; Positive: 2 Negative: 14; Observation LightEpoch-acquire-cas Sometimes 2 14; Hash=81ca6f9e2b3c98be222d9b796164b47e
+- lightepoch_acquire_casa.litmus: ALLOWED; Positive: 2 Negative: 14; Observation LightEpoch-acquire-casa Sometimes 2 14; Hash=67617426cac7855c712fc07ae19e1905
+- lightepoch_acquire_casl.litmus: ALLOWED; Positive: 2 Negative: 14; Observation LightEpoch-acquire-casl Sometimes 2 14; Hash=5d4cc9d1c200def2f40a865d052a1d72
+- lightepoch_acquire_casal.litmus: FORBIDDEN; Positive: 0 Negative: 10; Observation LightEpoch-acquire-casal Never 0 10; Hash=b22797f6fc34131e4e13b376a2b46005
+
+LL/SC note
+----------
+I also tried an LDAXR/STLXR implementation artifact:
+  lightepoch_acquire_ldaxr_stlxr_loop.litmus
+
+Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_acquire_ldaxr_stlxr_loop.litmus'
+Verdict: ALLOWED
+Witnesses: Positive: 3 Negative: 21
+Observation LightEpoch-acquire-ldaxr-stlxr-loop Sometimes 3 21
+Hash=866d927f0b3efb1d436c10209ffcf62a
+Warning from herd7: unrolling limit exceeded at retry, legal outcomes may be missing.
+
+I am not treating this LL/SC loop as equivalent evidence for the CASAL row. Under this litmus, direct LSE CASAL is FORBIDDEN but the modeled LDAXR/STLXR loop is ALLOWED, so code generation matters if the target can lower the announce CAS to LL/SC rather than LSE CASAL.
+
+Conclusion for fix minimality
+-----------------------------
+Row 2 confirms the claim that LDAR-only / fix B without an ordered announce does NOT close the acquire-entry store-side hazard. Row 4 shows STLR is NOT sufficient either. In the official AArch64 model, the requested store-side table supports keeping an acquire-release CASAL-style announce for part A; among direct CAS encodings, relaxed CAS, acquire-only CASA, and release-only CASL are all insufficient.
+
+LSE CASAL vs LDAXR/STLXR announce: codegen hazard and mitigations
+=================================================================
+Date: 2026-07-28 final follow-up
+
+Most important result
+---------------------
+A plain STR announce followed by DMB ISH is FORBIDDEN for the acquire-entry hazard:
+
+  P0: LDR currentEpoch; STR readerSlot; DMB ISH; LDR objectUnlinked
+  P1: STR objectUnlinked; LDADDAL currentEpoch; LDR readerSlot
+
+Result:
+  Observation LightEpoch-acquire-str-dmb Never 0 5
+
+So if robustness across LSE and non-LSE codegen is the priority, a fenced store is a viable model-level fix and avoids depending on CASAL being emitted.
+
+LDAXR/STLXR re-check
+--------------------
+I re-ran the exclusive-loop variant with the acquire/release forms, not relaxed forms. The exact P0 loop was:
+
+  LDR W4,[X0]
+  retry:
+  LDAXR W7,[X1]
+  STLXR W8,W4,[X1]
+  CBNZ W8,retry
+  LDR W5,[X2]
+
+P1 remained faithful:
+
+  MOV W4,#1
+  STR W4,[X0]
+  LDADDAL W4,W5,[X1]
+  LDR W6,[X2]
+  CBZ W6,free
+  B done
+  free:
+  STR W4,[X3]
+  done:
+
+Command:
+  docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -unroll 8 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_acquire_ldaxr_stlxr_loop.litmus'
+
+Verdict:
+  ALLOWED
+
+herd7 summary:
+  Loop Ok
+  Witnesses
+  Positive: 9 Negative: 63
+  Observation LightEpoch-acquire-ldaxr-stlxr-loop Sometimes 9 63
+  Hash=866d927f0b3efb1d436c10209ffcf62a
+  Warning: unrolling limit exceeded at retry, legal outcomes may be missing.
+
+The warning means some legal outcomes may be absent, but not that the positive witness is fabricated; the buggy outcome was still found with the acquire/release exclusive loop.
+
+Mechanism suggested by the model
+--------------------------------
+CASAL is modeled as one acquire-release RMW operation. Its acquire annotation orders later operations after the atomic operation as a whole, and its release annotation orders earlier operations before it. In contrast, the LDAXR/STLXR sequence is two separate instructions: LDAXR acquire orders later operations after the exclusive load, and STLXR release orders earlier operations before the exclusive store, but that pair does not compose into the same StoreLoad-style edge from the successful store to the later objectUnlinked load. The herd results reflect exactly that distinction: direct LSE CASAL forbids the outcome, but the acquire/release exclusive loop permits it unless an explicit post-store barrier is added.
+
+Mitigation tests
+----------------
+All commands used:
+  docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -unroll 8 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat <file>'
+
+| Mitigation | File | Verdict | Observation |
+|---|---|---|---|
+| LDAXR/STLXR loop, no added DMB | lightepoch_acquire_ldaxr_stlxr_loop.litmus | ALLOWED | Observation LightEpoch-acquire-ldaxr-stlxr-loop Sometimes 9 63 |
+| LDAXR/STLXR loop followed by DMB ISH | lightepoch_acquire_ldaxr_stlxr_loop_dmb_after.litmus | FORBIDDEN | Observation LightEpoch-acquire-ldaxr-stlxr-loop-dmb-after Never 0 45 |
+| LDAXR/STLXR loop preceded by DMB ISH | lightepoch_acquire_ldaxr_stlxr_loop_dmb_before.litmus | ALLOWED | Observation LightEpoch-acquire-ldaxr-stlxr-loop-dmb-before Sometimes 9 45 |
+| Plain STR announce followed by DMB ISH | lightepoch_acquire_str_dmb.litmus | FORBIDDEN | Observation LightEpoch-acquire-str-dmb Never 0 5 |
+
+Exact mitigation summaries
+--------------------------
+- lightepoch_acquire_ldaxr_stlxr_loop.litmus: ALLOWED; Positive: 9 Negative: 63; Observation LightEpoch-acquire-ldaxr-stlxr-loop Sometimes 9 63; Hash=866d927f0b3efb1d436c10209ffcf62a
+- lightepoch_acquire_ldaxr_stlxr_loop_dmb_after.litmus: FORBIDDEN; Positive: 0 Negative: 45; Observation LightEpoch-acquire-ldaxr-stlxr-loop-dmb-after Never 0 45; Hash=a6e980356959ddb7e2650492d1ddff83
+- lightepoch_acquire_ldaxr_stlxr_loop_dmb_before.litmus: ALLOWED; Positive: 9 Negative: 45; Observation LightEpoch-acquire-ldaxr-stlxr-loop-dmb-before Sometimes 9 45; Hash=55287e97d38bc7f70c9a987ae19e9a6b
+- lightepoch_acquire_str_dmb.litmus: FORBIDDEN; Positive: 0 Negative: 5; Observation LightEpoch-acquire-str-dmb Never 0 5; Hash=d34b87cbb70615208dc0e003f1dc22c0
+
+Practical interpretation
+------------------------
+The model-level cheapest robust mitigation among these rows is not a pre-barrier; it is a post-announce full barrier. Either the exclusive-loop CAS needs a DMB ISH after the successful STLXR, or the announce can be modeled as plain STR followed by DMB ISH. The latter is immune to LSE-vs-exclusive-loop CAS codegen differences in this litmus.
+
+Refresh-side codegen check
+--------------------------
+The refresh-side result depends on an ordinary acquire load of currentEpoch:
+
+  LDAR currentEpoch; STR readerSlot; LDR objectUnlinked
+
+LDAR is a base AArch64 load-acquire instruction, not an LSE atomic RMW. There is no LSE-vs-LL/SC lowering choice analogous to CASAL for that instruction in the litmus. Therefore the codegen variability found for the CAS announce does not apply to the refresh-side LDAR result, assuming the implementation really requests/receives an acquire load rather than a plain LDR.
+
+Composed two-half fix: acquire announce plus refresh announce
+============================================================
+Date: 2026-07-28 final composition check
+
+Purpose
+-------
+This single litmus shape composes both hazards in one reader program:
+
+  P0 acquire announce:  readerSlot = e0, where e0 is fixed to triggerEpoch=1 so it protects the old object if visible
+  P0 refresh announce:  load currentEpoch into e1; readerSlot = e1; load objectUnlinked into u
+  P1 reclaimer:         STR objectUnlinked=1; LDADDAL currentEpoch; LDR readerSlot; free if slot==0 or slot>1
+
+Initial state:
+  currentEpoch=1; readerSlot=0; objectUnlinked=0; objectFreed=0
+
+The common buggy condition for rows A, C, and D is:
+  exists (0:X6=0 /\ [objectFreed]=1)
+
+For the CASAL row B, the condition also requires the CAS to have observed the initial slot value:
+  exists (0:X8=0 /\ 0:X6=0 /\ [objectFreed]=1)
+
+Faithful reclaimer assembly used in every composed row:
+
+  MOV W4,#1
+  STR W4,[X0]
+  LDADDAL W4,W5,[X1]
+  LDR W7,[X2]
+  CBZ W7,free
+  CMP W7,#1
+  B.GT free
+  B done
+  free:
+  STR W4,[X3]
+  done:
+
+Controls were run first. Both controls are ALLOWED, so the composed encoding is live and not over-constrained.
+
+All commands use:
+  docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat <file>'
+
+Composed results
+----------------
+| Row | Variant | File | Verdict | Observation |
+|---|---|---|---|---|
+| C control | acquire STR+DMB ISH; refresh plain LDR | lightepoch_composed_str_dmb_ldr.litmus | ALLOWED | Observation LightEpoch-composed-str-dmb-ldr Sometimes 1 8 |
+| D control | acquire plain STR; refresh LDAR | lightepoch_composed_str_ldar.litmus | ALLOWED | Observation LightEpoch-composed-str-ldar Sometimes 1 8 |
+| A candidate | acquire STR+DMB ISH; refresh LDAR | lightepoch_composed_str_dmb_ldar.litmus | FORBIDDEN | Observation LightEpoch-composed-str-dmb-ldar Never 0 7 |
+| B candidate | acquire CASAL; refresh LDAR | lightepoch_composed_casal_ldar.litmus | FORBIDDEN | Observation LightEpoch-composed-casal-ldar Never 0 14 |
+
+Exact row summaries
+-------------------
+C. lightepoch_composed_str_dmb_ldr.litmus
+   P0 assembly:
+     MOV W4,#1
+     STR W4,[X1]
+     DMB ISH
+     LDR W5,[X0]
+     STR W5,[X1]
+     LDR W6,[X2]
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_composed_str_dmb_ldr.litmus'
+   Verdict: ALLOWED
+   Witnesses: Positive: 1 Negative: 8
+   Observation LightEpoch-composed-str-dmb-ldr Sometimes 1 8
+   Hash=7b822ae23b60e6dea4fa047c394f2419
+
+D. lightepoch_composed_str_ldar.litmus
+   P0 assembly:
+     MOV W4,#1
+     STR W4,[X1]
+     LDAR W5,[X0]
+     STR W5,[X1]
+     LDR W6,[X2]
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_composed_str_ldar.litmus'
+   Verdict: ALLOWED
+   Witnesses: Positive: 1 Negative: 8
+   Observation LightEpoch-composed-str-ldar Sometimes 1 8
+   Hash=31f11507eb40aac18d27c3036f49e4b4
+
+A. lightepoch_composed_str_dmb_ldar.litmus
+   P0 assembly:
+     MOV W4,#1
+     STR W4,[X1]
+     DMB ISH
+     LDAR W5,[X0]
+     STR W5,[X1]
+     LDR W6,[X2]
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_composed_str_dmb_ldar.litmus'
+   Verdict: FORBIDDEN
+   Witnesses: Positive: 0 Negative: 7
+   Observation LightEpoch-composed-str-dmb-ldar Never 0 7
+   Hash=52abf4b9269871054c5d92933954fdc7
+
+B. lightepoch_composed_casal_ldar.litmus
+   P0 assembly:
+     MOV W4,#1
+     MOV W8,#0
+     CASAL W8,W4,[X1]
+     LDAR W5,[X0]
+     STR W5,[X1]
+     LDR W6,[X2]
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_composed_casal_ldar.litmus'
+   Verdict: FORBIDDEN
+   Witnesses: Positive: 0 Negative: 14
+   Observation LightEpoch-composed-casal-ldar Never 0 14
+   Hash=cb887d31956799db45f9f7144a18f7d9
+
+Conclusion
+----------
+The composed codegen-independent candidate A is sufficient in this single-program litmus: acquire STR+DMB ISH plus refresh LDAR forbids the unsafe outcome. The LSE-dependent candidate B, CASAL plus refresh LDAR, is also sufficient in the direct-CASAL model. The controls show each half is load-bearing: removing refresh LDAR while keeping the fenced acquire announce is ALLOWED, and removing the acquire announce fence while keeping refresh LDAR is ALLOWED. I did not find a composition interaction that invalidates the isolated results; the composed test agrees with the two isolated hazards.
+
+
+
+Refresh fence-vs-LDAR hardware A/B check
+========================================
+Date: 2026-07-29
+
+Question
+--------
+Check the reader variant:
+
+  LDR currentEpoch; STR readerSlot; DMB ISH; LDR objectUnlinked
+
+against the faithful writer side:
+
+  STR objectUnlinked=1; LDADDAL currentEpoch; LDR readerSlot
+
+The buggy condition is:
+
+  exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ [objectFreed]=1)
+
+where P1/read-side X4 is the epoch load, P1/read-side X5 is objectUnlinked, and P0/reclaimer X6 is the slot load. Thus the reader has announced the bumped epoch (1), then read stale objectUnlinked==0, while the reclaimer observed slot==1 and freed because triggerEpoch is 0.
+
+Tool/model
+----------
+herd7 version:
+  7.58, Rev: exported
+cat/model:
+  /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat
+
+Common command form:
+  docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat <file>'
+
+Results table
+-------------
+| Variant | File | Verdict | States | Witness count | Observation |
+|---|---|---|---:|---:|---|
+| control: no fence, LDR; STR; LDR | lightepoch_refresh_no_fence.litmus | ALLOWED | 6 | 1/7 | Observation LightEpoch-refresh-no-fence Sometimes 1 7 |
+| control: DMB before STR, LDR; DMB ISH; STR; LDR | lightepoch_refresh_fence_before_str.litmus | FORBIDDEN | 4 | 0/6 | Observation LightEpoch-refresh-fence-before-str Never 0 6 |
+| target: DMB after STR, LDR; STR; DMB ISH; LDR | lightepoch_refresh_fence_after.litmus | FORBIDDEN | 4 | 0/5 | Observation LightEpoch-refresh-fence-after Never 0 5 |
+| writer sensitivity: target reader, but writer uses relaxed LDADD | lightepoch_refresh_fence_after_relaxed_rmw.litmus | ALLOWED | 6 | 1/7 | Observation LightEpoch-refresh-fence-after-relaxed-rmw Sometimes 1 7 |
+
+Exact summaries
+---------------
+1. lightepoch_refresh_no_fence.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_refresh_no_fence.litmus'
+   Verdict: ALLOWED
+   States: 6
+   Witnesses: Positive: 1 Negative: 7
+   Observation LightEpoch-refresh-no-fence Sometimes 1 7
+   Hash=8607e99d6085f86596a82b1f36f5367e
+
+2. lightepoch_refresh_fence_before_str.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_refresh_fence_before_str.litmus'
+   Verdict: FORBIDDEN
+   States: 4
+   Witnesses: Positive: 0 Negative: 6
+   Observation LightEpoch-refresh-fence-before-str Never 0 6
+   Hash=bef2538f05ff0c08e1cd42aa61c277f0
+
+3. lightepoch_refresh_fence_after.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_refresh_fence_after.litmus'
+   Verdict: FORBIDDEN
+   States: 4
+   Witnesses: Positive: 0 Negative: 5
+   Observation LightEpoch-refresh-fence-after Never 0 5
+   Hash=d63fb4d38bddab9e6fd80edfa8baf908
+
+4. lightepoch_refresh_fence_after_relaxed_rmw.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_refresh_fence_after_relaxed_rmw.litmus'
+   Verdict: ALLOWED
+   States: 6
+   Witnesses: Positive: 1 Negative: 7
+   Observation LightEpoch-refresh-fence-after-relaxed-rmw Sometimes 1 7
+   Hash=20438cffb762a990275f62a029b758c8
+
+Interpretation
+--------------
+The target fence variant is FORBIDDEN in the official AArch64 model with the faithful LDADDAL writer. This confirms the claim that, for this message-passing litmus, LDR currentEpoch; STR slot; DMB ISH; LDR objectUnlinked is at least as strong as the LDAR-currentEpoch fix: the DMB ISH orders the currentEpoch load before the objectUnlinked load, and the store value is data-dependent on the epoch load.
+
+The no-fence control is ALLOWED, so the test is live. The relaxed-writer control flips the target row back to ALLOWED, so the result depends on the writer-side LDADDAL acquire-release RMW and is not an accidental over-constraint. Moving DMB ISH before the announce store is also FORBIDDEN in this refresh-only litmus, because it still sits between the two reader loads and provides the relevant load-load ordering; placement relative to the announce store does not matter for this specific refresh hazard.
+
+Full litmus source: lightepoch_refresh_no_fence.litmus
+------------------------------------------------------
+```
+AArch64 LightEpoch-refresh-no-fence
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | LDR W4,[X0]        ;
+ STR W4,[X0]        | STR W4,[X1]        ;
+ LDADDAL W4,W5,[X1] | LDR W5,[X2]        ;
+ LDR W6,[X2]        |                    ;
+ CBZ W6,free        |                    ;
+ CMP W6,#0          |                    ;
+ B.GT free          |                    ;
+ B done             |                    ;
+ free:              |                    ;
+ STR W4,[X3]        |                    ;
+ done:              |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)
+```
+
+Full litmus source: lightepoch_refresh_fence_before_str.litmus
+--------------------------------------------------------------
+```
+AArch64 LightEpoch-refresh-fence-before-str
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | LDR W4,[X0]        ;
+ STR W4,[X0]        | DMB ISH            ;
+ LDADDAL W4,W5,[X1] | STR W4,[X1]        ;
+ LDR W6,[X2]        | LDR W5,[X2]        ;
+ CBZ W6,free        |                    ;
+ CMP W6,#0          |                    ;
+ B.GT free          |                    ;
+ B done             |                    ;
+ free:              |                    ;
+ STR W4,[X3]        |                    ;
+ done:              |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)
+```
+
+Full litmus source: lightepoch_refresh_fence_after.litmus
+---------------------------------------------------------
+```
+AArch64 LightEpoch-refresh-fence-after
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | LDR W4,[X0]        ;
+ STR W4,[X0]        | STR W4,[X1]        ;
+ LDADDAL W4,W5,[X1] | DMB ISH            ;
+ LDR W6,[X2]        | LDR W5,[X2]        ;
+ CBZ W6,free        |                    ;
+ CMP W6,#0          |                    ;
+ B.GT free          |                    ;
+ B done             |                    ;
+ free:              |                    ;
+ STR W4,[X3]        |                    ;
+ done:              |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)
+```
+
+Full litmus source: lightepoch_refresh_fence_after_relaxed_rmw.litmus
+---------------------------------------------------------------------
+```
+AArch64 LightEpoch-refresh-fence-after-relaxed-rmw
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                | P1                 ;
+ MOV W4,#1         | LDR W4,[X0]        ;
+ STR W4,[X0]       | STR W4,[X1]        ;
+ LDADD W4,W5,[X1]  | DMB ISH            ;
+ LDR W6,[X2]       | LDR W5,[X2]        ;
+ CBZ W6,free       |                    ;
+ CMP W6,#0         |                    ;
+ B.GT free         |                    ;
+ B done            |                    ;
+ free:             |                    ;
+ STR W4,[X3]       |                    ;
+ done:             |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)
+```
+
+
+LDAPR refresh check and non-LSE CAS+DMB composition
+==================================================
+Date: 2026-07-29
+
+Key result
+----------
+herdtools7 7.58 with the official AArch64 model accepts the LDAPR mnemonic directly. I did not substitute LDAR.
+
+  LDAPR currentEpoch; STR readerSlot; LDR objectUnlinked
+
+is FORBIDDEN for the bad refresh/message-passing outcome with the faithful writer:
+
+  STR objectUnlinked=1; LDADDAL currentEpoch; LDR readerSlot
+
+This means the official model agrees with the expectation that LDAPR still supplies the needed load-to-subsequent-load ordering for this litmus. LDAPR and LDAR had identical state/witness counts in this batch.
+
+Tool/model
+----------
+herd7 version:
+  7.58, Rev: exported
+cat/model:
+  /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat
+LDAPR support probe:
+  A one-instruction probe containing `LDAPR W1,[X0]` parsed and ran successfully under this herd7/aarch64.cat build.
+
+Common refresh condition
+------------------------
+  exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ [objectFreed]=1)
+
+where reader P1 loaded the bumped epoch (X4=1), then read stale objectUnlinked (X5=0), while reclaimer P0 read readerSlot==1 (X6=1) and freed.
+
+Common command form
+-------------------
+  docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat <file>'
+
+Refresh results
+---------------
+| Variant | File | Verdict | States | Witness count | Observation |
+|---|---|---|---:|---:|---|
+| control: plain LDR | lightepoch_refresh_no_fence.litmus | ALLOWED | 6 | 1/7 | Observation LightEpoch-refresh-no-fence Sometimes 1 7 |
+| actual .NET acquire: LDAPR | lightepoch_refresh_ldapr.litmus | FORBIDDEN | 4 | 0/6 | Observation LightEpoch-refresh-ldapr Never 0 6 |
+| comparison: LDAR | lightepoch_refresh_ldar_compare.litmus | FORBIDDEN | 4 | 0/6 | Observation LightEpoch-refresh-ldar-compare Never 0 6 |
+| writer sensitivity: LDAPR reader, relaxed LDADD writer | lightepoch_refresh_ldapr_relaxed_rmw.litmus | ALLOWED | 6 | 1/7 | Observation LightEpoch-refresh-ldapr-relaxed-rmw Sometimes 1 7 |
+
+Exact refresh summaries
+-----------------------
+1. lightepoch_refresh_no_fence.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_refresh_no_fence.litmus'
+   Verdict: ALLOWED
+   States: 6
+   Witnesses: Positive: 1 Negative: 7
+   Observation LightEpoch-refresh-no-fence Sometimes 1 7
+   Hash=8607e99d6085f86596a82b1f36f5367e
+
+2. lightepoch_refresh_ldapr.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_refresh_ldapr.litmus'
+   Verdict: FORBIDDEN
+   States: 4
+   Witnesses: Positive: 0 Negative: 6
+   Observation LightEpoch-refresh-ldapr Never 0 6
+   Hash=3aeeed45ed7b319dbed7ec2b0604ed60
+
+3. lightepoch_refresh_ldar_compare.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_refresh_ldar_compare.litmus'
+   Verdict: FORBIDDEN
+   States: 4
+   Witnesses: Positive: 0 Negative: 6
+   Observation LightEpoch-refresh-ldar-compare Never 0 6
+   Hash=e0a8b78d14f3de176a3b9fee4093924c
+
+4. lightepoch_refresh_ldapr_relaxed_rmw.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_refresh_ldapr_relaxed_rmw.litmus'
+   Verdict: ALLOWED
+   States: 6
+   Witnesses: Positive: 1 Negative: 7
+   Observation LightEpoch-refresh-ldapr-relaxed-rmw Sometimes 1 7
+   Hash=e9d2c1afa06514610aa378454d5078f0
+
+Interpretation
+--------------
+LDAPR is sufficient for the refresh-side message-passing hazard in this official-model litmus. The plain-LDR row is ALLOWED, so the hazard is live. The relaxed-writer control flips LDAPR back to ALLOWED, so the FORBIDDEN result is not an artifact: it depends on the writer publishing objectUnlinked before currentEpoch via LDADDAL's acquire-release RMW. In this litmus, LDAPR and LDAR are indistinguishable by the observed state/witness counts (4 states, 0/6 positive witnesses).
+
+Non-LSE CAS path composed with LDAPR refresh
+-------------------------------------------
+The exact successful-iteration sequence tested for the non-LSE slot-claiming CAS was:
+
+  LDAXR W8,[X1]
+  STLXR W9,W4,[X1]
+  DMB ISH
+  LDAPR W5,[X0]
+  STR W5,[X1]
+  LDR W6,[X2]
+
+with the condition requiring LDAXR saw 0 and STLXR succeeded:
+
+  exists (0:X8=0 /\ 0:X9=0 /\ 0:X6=0 /\ [objectFreed]=1)
+
+Result:
+  FORBIDDEN; States: 7; Positive: 0 Negative: 13; Observation LightEpoch-composed-llsc-dmb-ldapr Never 0 13
+
+I also ran the same shape with an explicit CBNZ retry loop at herd's default unroll:
+
+  retry:
+  LDAXR W8,[X1]
+  STLXR W9,W4,[X1]
+  CBNZ W9,retry
+  DMB ISH
+  LDAPR W5,[X0]
+  STR W5,[X1]
+  LDR W6,[X2]
+
+Result:
+  FORBIDDEN; States: 3; Positive: 0 Negative: 21; Observation LightEpoch-composed-llsc-loop-dmb-ldapr Never 0 21
+  herd7 warning: unrolling limit exceeded at retry, legal outcomes may be missing.
+
+The loop warning means the state space is under-approximated for retry behavior, but the straight-line successful-iteration row already matches the emitted three-part ordering sequence and is FORBIDDEN.
+
+Exact composed summaries
+------------------------
+5. lightepoch_composed_llsc_dmb_ldapr.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_composed_llsc_dmb_ldapr.litmus'
+   Verdict: FORBIDDEN
+   States: 7
+   Witnesses: Positive: 0 Negative: 13
+   Observation LightEpoch-composed-llsc-dmb-ldapr Never 0 13
+   Hash=9d90c72f74aaa3f0fe62b5fb083c4fc5
+
+6. lightepoch_composed_llsc_loop_dmb_ldapr.litmus
+   Command: docker run --rm -v "Q:\src\lightepoch-tla\herd:/work" lightepoch-herdtools:7.58 sh -lc 'eval $(opam env); cd /work; herd7 -model /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat lightepoch_composed_llsc_loop_dmb_ldapr.litmus'
+   Verdict: FORBIDDEN
+   States: 3
+   Witnesses: Positive: 0 Negative: 21
+   Observation LightEpoch-composed-llsc-loop-dmb-ldapr Never 0 21
+   Hash=30beef3cd67c4aa15eff3909503f928d
+
+Full litmus source: lightepoch_refresh_no_fence.litmus
+------------------------------------------------------
+```
+AArch64 LightEpoch-refresh-no-fence
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | LDR W4,[X0]        ;
+ STR W4,[X0]        | STR W4,[X1]        ;
+ LDADDAL W4,W5,[X1] | LDR W5,[X2]        ;
+ LDR W6,[X2]        |                    ;
+ CBZ W6,free        |                    ;
+ CMP W6,#0          |                    ;
+ B.GT free          |                    ;
+ B done             |                    ;
+ free:              |                    ;
+ STR W4,[X3]        |                    ;
+ done:              |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)
+```
+
+Full litmus source: lightepoch_refresh_ldapr.litmus
+---------------------------------------------------
+```
+AArch64 LightEpoch-refresh-ldapr
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | LDAPR W4,[X0]      ;
+ STR W4,[X0]        | STR W4,[X1]        ;
+ LDADDAL W4,W5,[X1] | LDR W5,[X2]        ;
+ LDR W6,[X2]        |                    ;
+ CBZ W6,free        |                    ;
+ CMP W6,#0          |                    ;
+ B.GT free          |                    ;
+ B done             |                    ;
+ free:              |                    ;
+ STR W4,[X3]        |                    ;
+ done:              |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)
+```
+
+Full litmus source: lightepoch_refresh_ldar_compare.litmus
+----------------------------------------------------------
+```
+AArch64 LightEpoch-refresh-ldar-compare
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | LDAR W4,[X0]       ;
+ STR W4,[X0]        | STR W4,[X1]        ;
+ LDADDAL W4,W5,[X1] | LDR W5,[X2]        ;
+ LDR W6,[X2]        |                    ;
+ CBZ W6,free        |                    ;
+ CMP W6,#0          |                    ;
+ B.GT free          |                    ;
+ B done             |                    ;
+ free:              |                    ;
+ STR W4,[X3]        |                    ;
+ done:              |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)
+```
+
+Full litmus source: lightepoch_refresh_ldapr_relaxed_rmw.litmus
+---------------------------------------------------------------
+```
+AArch64 LightEpoch-refresh-ldapr-relaxed-rmw
+{
+currentEpoch=0;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=objectUnlinked; 0:X1=currentEpoch; 0:X2=readerSlot; 0:X3=objectFreed;
+1:X0=currentEpoch; 1:X1=readerSlot; 1:X2=objectUnlinked;
+}
+ P0                | P1                 ;
+ MOV W4,#1         | LDAPR W4,[X0]      ;
+ STR W4,[X0]       | STR W4,[X1]        ;
+ LDADD W4,W5,[X1]  | LDR W5,[X2]        ;
+ LDR W6,[X2]       |                    ;
+ CBZ W6,free       |                    ;
+ CMP W6,#0         |                    ;
+ B.GT free         |                    ;
+ B done            |                    ;
+ free:             |                    ;
+ STR W4,[X3]       |                    ;
+ done:             |                    ;
+
+exists (1:X4=1 /\ 1:X5=0 /\ 0:X6=1 /\ objectFreed=1)
+```
+
+Full litmus source: lightepoch_composed_llsc_dmb_ldapr.litmus
+-------------------------------------------------------------
+```
+AArch64 LightEpoch-composed-llsc-dmb-ldapr
+{
+currentEpoch=1;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=currentEpoch; 0:X1=readerSlot; 0:X2=objectUnlinked;
+1:X0=objectUnlinked; 1:X1=currentEpoch; 1:X2=readerSlot; 1:X3=objectFreed;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | MOV W4,#1          ;
+ LDAXR W8,[X1]      | STR W4,[X0]        ;
+ STLXR W9,W4,[X1]   | LDADDAL W4,W5,[X1] ;
+ DMB ISH            | LDR W7,[X2]        ;
+ LDAPR W5,[X0]      | CBZ W7,free        ;
+ STR W5,[X1]        | CMP W7,#1          ;
+ LDR W6,[X2]        | B.GT free          ;
+                    | B done             ;
+                    | free:              ;
+                    | STR W4,[X3]        ;
+                    | done:              ;
+
+exists (0:X8=0 /\ 0:X9=0 /\ 0:X6=0 /\ objectFreed=1)
+```
+
+Full litmus source: lightepoch_composed_llsc_loop_dmb_ldapr.litmus
+------------------------------------------------------------------
+```
+AArch64 LightEpoch-composed-llsc-loop-dmb-ldapr
+{
+currentEpoch=1;
+readerSlot=0;
+objectUnlinked=0;
+objectFreed=0;
+0:X0=currentEpoch; 0:X1=readerSlot; 0:X2=objectUnlinked;
+1:X0=objectUnlinked; 1:X1=currentEpoch; 1:X2=readerSlot; 1:X3=objectFreed;
+}
+ P0                 | P1                 ;
+ MOV W4,#1          | MOV W4,#1          ;
+ retry:             | STR W4,[X0]        ;
+ LDAXR W8,[X1]      | LDADDAL W4,W5,[X1] ;
+ STLXR W9,W4,[X1]   | LDR W7,[X2]        ;
+ CBNZ W9,retry      | CBZ W7,free        ;
+ DMB ISH            | CMP W7,#1          ;
+ LDAPR W5,[X0]      | B.GT free          ;
+ STR W5,[X1]        | B done             ;
+ LDR W6,[X2]        | free:              ;
+                    | STR W4,[X3]        ;
+                    | done:              ;
+
+exists (0:X8=0 /\ 0:X9=0 /\ 0:X6=0 /\ objectFreed=1)
+```
+
+
+Lost wakeup in Release() / ReserveEntryWait() - the RCsc/RCpc question
+=====================================================================
+Date: 2026-07-29
+
+A barrier audit of the production class proposed that Release() contains a
+store-buffering pair with a fence on only one side:
+
+  Releaser (Release())            Waiter (ReserveEntryWait())
+    STORE localCurrentEpoch = 0     Interlocked.Increment(waiterCount)  <- full-fence RMW
+    LOAD  waiterCount               CAS on localCurrentEpoch (claim)
+    if (waiterCount > 0) signal     if the CAS fails -> semaphore.Wait()
+
+If the releaser reads waiterCount as a stale 0 while the waiter's claim CAS reads
+localCurrentEpoch as a stale non-zero, nobody signals and the waiter sleeps
+forever on a slot that is in fact free. The audit graded this as an unconditional
+hang on the grounds that an acquire load cannot close store buffering.
+
+That reasoning is correct for the abstract acquire of the .NET memory model and
+WRONG for the instruction AArch64 emits, because AArch64 acquire/release are
+RCsc: an LDAR may not be reordered before an earlier STLR, so STLR;LDAR supplies
+StoreLoad ordering on its own. LDAPR is RCpc and drops exactly that edge.
+
+Same command line as the tables above.
+
+| Releaser shape | Waiter RMW | File | Verdict |
+|---|---|---|---|
+| STLR ; LDAR | LDADDAL | lightepoch_release_wakeup_stlr_ldar.litmus | Never 0 7 (forbidden) |
+| STLR ; LDAPR | LDADDAL | lightepoch_release_wakeup_stlr_ldapr.litmus | Sometimes 3 7 (allowed) |
+| SWPAL ; LDAR | LDADDAL | lightepoch_release_wakeup_swpal.litmus | Never 0 7 (forbidden) |
+| STLR ; DMB ISH ; LDAR | LDADDAL | lightepoch_release_wakeup_dmb.litmus | Never 0 7 (forbidden) |
+| STLR ; LDAR (CONTROL) | LDADD (relaxed) | lightepoch_release_wakeup_waiter_relaxed.litmus | Sometimes 3 7 (allowed) |
+
+The last row is the sensitivity control and it is what makes the three Never
+verdicts worth anything: weakening the waiter's RMW to a relaxed LDADD does
+produce the hang, so the litmus can express the outcome and the forbidden
+verdicts are real forbiddance rather than a malformed test.
+
+Conclusion: the existence of this hang does not depend on the algorithm. It
+depends only on whether the JIT emits ldar or ldapr for the volatile read of
+waiterCount. Neoverse N2 implements FEAT_LRCPC, so the JIT is permitted to choose
+ldapr. Pending disassembly on ARM64 hardware. Note that at the .NET memory model
+level the concern stands regardless, since the spec promises only acquire and
+does not promise RCsc.
+
+================================================================================
+CORRECTION: the production Release() shape (STR, not STLR)
+================================================================================
+The earlier section concluded that the lost wakeup in Release() hinges on JIT
+codegen (ldar vs ldapr). That conclusion assumed the releaser's publishing store
+is an STLR. In PRODUCTION LightEpoch it is not: Release() clears both words with
+ordinary stores (LightEpoch.cs:551-552) and only then does the volatile read of
+waiterCount (:555). The shape is STR;LDAR, and LDAR constrains only accesses
+that FOLLOW it -- it places no ordering constraint on an earlier plain store.
+
+herd7 7.58 vs ARM's official aarch64.cat:
+
+  lightepoch_release_wakeup_str_ldar          Allowed   Positive: 3 Negative: 7
+  lightepoch_release_wakeup_str_ldapr         Allowed   Positive: 3 Negative: 7
+  lightepoch_release_wakeup_stlr_ldar_casal   No        Positive: 0 Negative: 7
+
+Rows 1 and 3 differ in exactly one instruction on P0 (STR vs STLR); P1 is
+byte-identical (LDADDAL + CASAL, what .NET actually emits for
+Interlocked.Increment and Interlocked.CompareExchange). Store strength is
+therefore isolated as the single variable.
+
+VERDICT: in production the lost wakeup is real and UNCONDITIONAL on AArch64,
+independent of the ldar/ldapr question. That question only decided whether the
+FIXED implementation is also exposed -- and because the fix publishes with
+Volatile.Write (STLR), it is not.
+
+Liveness only; no memory-safety consequence. Unreachable until the epoch table
+is full (needs more concurrently protected threads than max(128, 2*nproc)).
+
+================================================================================
+Refresh load strength: LDAR (RCsc) vs LDAPR (RCpc), and the writer's RMW
+================================================================================
+Model: /home/opam/.opam/5.2/share/herdtools7/herd/aarch64.cat (herdtools7 7.58)
+
+The composed-fix result was verified with LDAPR because that is what the JIT
+actually emits for Volatile.Read on Neoverse N2. The relaxed-RMW control had
+only ever been run against LDAPR, which left it ambiguous whether that
+allowance was the RCpc weakening or the writer's bump. Filling in the missing
+cell (lightepoch_refresh_ldar_relaxed_rmw.litmus, new) settles it.
+
+  lightepoch_refresh_no_fence            LDR    + LDADDAL   Ok  Positive: 1 Negative: 7
+  lightepoch_refresh_ldar_compare        LDAR   + LDADDAL   No  Positive: 0 Negative: 6
+  lightepoch_refresh_ldapr               LDAPR  + LDADDAL   No  Positive: 0 Negative: 6
+  lightepoch_refresh_ldar_relaxed_rmw    LDAR   + LDADD     Ok  Positive: 1 Negative: 7
+  lightepoch_refresh_ldapr_relaxed_rmw   LDAPR  + LDADD     Ok  Positive: 1 Negative: 7
+
+LDAR and LDAPR agree in every cell. RCpc is sufficient here because the hazard
+needs only load->load ordering on the reader; the RCsc/RCpc difference concerns
+ordering against an earlier store-release, which this shape does not involve.
+
+The relaxed-RMW allowance is therefore a WRITER-side defect, not a reader-side
+one, and no strengthening of the reader's load repairs it. Production satisfies
+the writer side by construction: BumpCurrentEpoch uses Interlocked.Increment
+(LightEpoch.cs:368), which .NET specifies as sequentially consistent and which
+compiles to the AL form.
